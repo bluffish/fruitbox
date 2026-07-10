@@ -1,23 +1,26 @@
 # Multiplayer blueprint
 
-## First mode: private duel
+## First mode: private group room
 
-Two players receive the same generated 10×17 board and race for 120 seconds. Each player has an independent board and score. The higher verified score wins; a full-board clear wins ties by the faster server-recorded completion time. If neither player clears the board and their scores tie, the match is a draw.
+Two to eight friends join a private room, receive the same generated 10×17 board, and race for 120 seconds. Each player has an independent board and score. The higher verified score wins; a full-board clear wins ties by the faster server-recorded completion time. If no one clears and the top scores tie, the room result is a draw.
 
 This is deliberately not co-op. A shared board introduces simultaneous-move conflicts, turn rules, and a different scoring model, so it should be a later mode rather than a compromise in the first release.
 
 ## Player flow
 
 ```text
-Create duel → share room link → opponent joins → 3-second countdown → play → result
+Create room → share room link → friends join → arm room → everyone ready → 5-second countdown → play → result
 ```
 
-- **Create duel:** creates a private room and a six-character join code.
-- **Share:** host copies a URL such as `/duel/AB12CD`.
-- **Waiting room:** shows the host and guest as ready. The host starts only once two seats are occupied.
-- **Countdown:** server chooses a start timestamp a few seconds ahead, so both browsers begin on the same clock.
-- **Play:** each player sees their own identical board and a tiny live opponent-score indicator.
-- **Result:** winner, both scores, and a rematch button. Each completed player result also enters the normal global leaderboard as a verified run.
+- **Create room:** creates a private room with a six-character join code and a maximum of eight seats.
+- **Share:** host copies a URL such as `/room/AB12CD`.
+- **Open lobby:** friends can join, leave, and choose a ready state. The host sees the roster and can set the room to *start when ready*.
+- **Armed lobby:** no additional players may join. When every seated player is ready, the server begins a five-second countdown.
+- **Countdown:** server chooses a start timestamp ahead of time, so every browser begins on the same clock.
+- **Play:** each player sees their own identical board plus a compact, live-sorted score list for the room.
+- **Result:** winner, room standings, and a rematch button. Each completed player result also enters the normal global leaderboard as a verified run.
+
+The host must arm the room before readiness can trigger a countdown. This prevents a room from unexpectedly starting while a friend is still opening the invite link.
 
 ## Server authority
 
@@ -29,21 +32,22 @@ Move messages contain a monotonic move ID and the selected rectangle's cells. Th
 browser selection
   → WebSocket move message
   → server validates rectangle + sum + board state
-  → server broadcasts updated scores
+  → server broadcasts updated room standings
 ```
 
 ## Room state
 
 ```text
-waiting → countdown → live → finished → archived
+open → armed → countdown → live → finished → archived
 ```
 
 | State | Server behavior |
 | --- | --- |
-| waiting | Accept a host and one guest; retain reconnect tokens. |
-| countdown | Lock seats and announce the server start time. |
-| live | Validate moves, broadcast both scores, reject late/duplicate moves. |
-| finished | Finalize each verified run and publish a result. |
+| open | Accept 2–8 friends, allow roster changes and ready toggles. |
+| armed | Lock the roster; begin a countdown automatically when every seat is ready. |
+| countdown | Announce the server start time; a player becoming unready returns the room to armed. |
+| live | Validate moves, broadcast room standings, reject late/duplicate moves. |
+| finished | Finalize every verified run and publish standings. |
 | archived | Keep match history briefly; then retain only normal leaderboard runs. |
 
 ## Data model
@@ -52,10 +56,10 @@ The existing `players` and `runs` tables stay in place. Add:
 
 ```text
 matches
-  id, join_code, seed, status, created_at, starts_at, finished_at
+  id, join_code, host_player_id, max_players, seed, status, created_at, starts_at, finished_at
 
 match_players
-  match_id, player_id, seat, reconnect_token, score, completion_ms
+  match_id, player_id, seat, ready, reconnect_token, score, completion_ms
 
 match_moves
   match_id, player_id, move_id, moved_at, cells_json
@@ -66,19 +70,19 @@ The database is the durable match record. Active room state may live in process 
 ## Reconnection and fairness
 
 - Each seat gets a private reconnect token stored in local storage.
-- A reconnecting player can resume during a live match; the server sends their current board and both scores.
+- A reconnecting player can resume during a live match; the server sends their current board and room standings.
 - The server accepts moves only after `starts_at` and before the shared deadline.
 - Score updates use server validation, not a client-provided score.
-- Private rooms come first. Public matchmaking, ratings, spectators, and chat are intentionally out of scope.
+- Private rooms come first. Public matchmaking, ratings, spectators, team play, and chat are intentionally out of scope.
 
 ## Implementation order
 
 1. Refactor the shared game engine to validate and apply one move.
 2. Add match tables and private-room HTTP endpoints.
-3. Add a WebSocket server and the waiting-room state machine.
-4. Build the duel screen and reconnect flow.
-5. Finalize duel results into the existing global leaderboard.
+3. Add a WebSocket server and the open/armed waiting-room state machine.
+4. Build the group lobby, live standings, and reconnect flow.
+5. Finalize room results into the existing global leaderboard.
 
 ## UI direction
 
-Keep the current solo board untouched. Multiplayer adds a small `Duel` entry point, a sparse waiting room, and one opponent score line during play. The board remains the visual focus.
+Keep the current solo board untouched. Multiplayer adds a small `Room` entry point, a sparse ready-room roster, and a compact live standings list during play. The board remains the visual focus.
