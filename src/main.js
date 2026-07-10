@@ -10,6 +10,10 @@ const gameOverEl = document.querySelector('#game-over');
 const finalScoreEl = document.querySelector('#final-score');
 const selectionBoxEl = document.querySelector('#selection-box');
 const leaderboardEl = document.querySelector('#leaderboard-list');
+const usernameDialog = document.querySelector('#username-dialog');
+const usernameForm = document.querySelector('#username-form');
+const usernameInput = document.querySelector('#username-input');
+const usernameError = document.querySelector('#username-error');
 
 let board = [];
 let cells = [];
@@ -24,6 +28,7 @@ let moves = [];
 let startedAt = 0;
 let submitting = false;
 let startRequestId = 0;
+let currentPlayer = null;
 
 function formatTime(value) {
   return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
@@ -166,11 +171,12 @@ async function startGame() {
   gameOverEl.hidden = true;
   clearSelection();
   try {
-    const playerId = localStorage.getItem('fruitbox-player-id');
+    const playerId = currentPlayer?.id || localStorage.getItem('fruitbox-player-id');
     const run = await request('/api/runs', { method: 'POST', body: JSON.stringify({ playerId }) });
     if (requestId !== startRequestId) return;
     activeRun = run;
-    localStorage.setItem('fruitbox-player-id', activeRun.player.id);
+    currentPlayer = activeRun.player;
+    localStorage.setItem('fruitbox-player-id', currentPlayer.id);
     board = generateBoard(activeRun.seed);
     moves = [];
     secondsLeft = ROUND_SECONDS;
@@ -253,9 +259,44 @@ document.querySelector('#new-game').addEventListener('click', startGame);
 document.querySelector('#play-again').addEventListener('click', startGame);
 document.querySelector('#close-results').addEventListener('click', () => { gameOverEl.hidden = true; });
 window.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space' || event.repeat) return;
+  if (event.code !== 'Space' || event.repeat || usernameDialog.open) return;
   event.preventDefault();
   startGame();
 });
+usernameDialog.addEventListener('cancel', (event) => event.preventDefault());
+usernameForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  usernameError.textContent = '';
+  const displayName = usernameInput.value;
+  try {
+    currentPlayer = currentPlayer
+      ? await request(`/api/players/${currentPlayer.id}`, { method: 'PATCH', body: JSON.stringify({ displayName }) })
+      : await request('/api/players', { method: 'POST', body: JSON.stringify({ displayName }) });
+    localStorage.setItem('fruitbox-player-id', currentPlayer.id);
+    usernameDialog.close();
+    startGame();
+  } catch (error) {
+    usernameError.textContent = error.message;
+  }
+});
+
+async function initializePlayer() {
+  const playerId = localStorage.getItem('fruitbox-player-id');
+  if (playerId) {
+    try {
+      currentPlayer = await request(`/api/players/${playerId}`);
+    } catch {
+      localStorage.removeItem('fruitbox-player-id');
+    }
+  }
+  if (!currentPlayer || currentPlayer.displayName.startsWith('player-')) {
+    usernameInput.value = '';
+    usernameDialog.showModal();
+    setTimeout(() => usernameInput.focus(), 0);
+    return;
+  }
+  startGame();
+}
+
 loadLeaderboard();
-startGame();
+initializePlayer();

@@ -44,6 +44,17 @@
         </ol>
       </section>
     </main>
+
+    <dialog id="username-dialog" aria-labelledby="username-title">
+      <form id="username-form">
+        <label for="username-input" id="username-title">Choose a name</label>
+        <div class="username-fields">
+          <input id="username-input" name="username" type="text" autocomplete="username" minlength="2" maxlength="20" placeholder="your name" required />
+          <button type="submit">play</button>
+        </div>
+        <p id="username-error" role="alert"></p>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

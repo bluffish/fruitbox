@@ -41,6 +41,7 @@ db.exec(`
 
 const getPlayer = db.prepare('SELECT id, display_name AS displayName FROM players WHERE id = ?');
 const insertPlayer = db.prepare('INSERT INTO players (id, display_name, created_at) VALUES (?, ?, ?)');
+const updatePlayerName = db.prepare('UPDATE players SET display_name = ? WHERE id = ?');
 const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at) VALUES (?, ?, ?, ?)');
 const getRun = db.prepare('SELECT * FROM runs WHERE id = ?');
 const finishRun = db.prepare('UPDATE runs SET finished_at = ?, score = ?, duration_ms = ?, moves_json = ?, verified = 1 WHERE id = ?');
@@ -77,15 +78,28 @@ function validToken(runId, token) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
+function cleanDisplayName(value) {
+  if (typeof value !== 'string') throw new Error('Enter a name.');
+  const name = value.trim().replace(/\s+/g, ' ');
+  if (Array.from(name).length < 2 || Array.from(name).length > 20 || /[\u0000-\u001F\u007F]/.test(name)) {
+    throw new Error('Names must be 2–20 characters.');
+  }
+  return name;
+}
+
+function createPlayer(displayName) {
+  const playerId = randomUUID();
+  const player = { id: playerId, displayName: displayName || `player-${playerId.slice(0, 4)}` };
+  insertPlayer.run(player.id, player.displayName, Date.now());
+  return player;
+}
+
 function playerFor(id) {
   if (typeof id === 'string') {
     const existing = getPlayer.get(id);
     if (existing) return existing;
   }
-  const playerId = randomUUID();
-  const player = { id: playerId, displayName: `player-${playerId.slice(0, 4)}` };
-  insertPlayer.run(player.id, player.displayName, Date.now());
-  return player;
+  return createPlayer();
 }
 
 async function serveFile(requestPath, response) {
@@ -108,7 +122,20 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   try {
     if (request.method === 'POST' && url.pathname === '/api/players') {
-      return json(response, 201, playerFor());
+      const { displayName } = await readJson(request);
+      return json(response, 201, createPlayer(cleanDisplayName(displayName)));
+    }
+    if (request.method === 'GET' && /^\/api\/players\/[^/]+$/.test(url.pathname)) {
+      const player = getPlayer.get(decodeURIComponent(url.pathname.split('/')[3]));
+      return player ? json(response, 200, player) : json(response, 404, { error: 'Player not found.' });
+    }
+    if (request.method === 'PATCH' && /^\/api\/players\/[^/]+$/.test(url.pathname)) {
+      const playerId = decodeURIComponent(url.pathname.split('/')[3]);
+      if (!getPlayer.get(playerId)) return json(response, 404, { error: 'Player not found.' });
+      const { displayName } = await readJson(request);
+      const player = { id: playerId, displayName: cleanDisplayName(displayName) };
+      updatePlayerName.run(player.displayName, player.id);
+      return json(response, 200, player);
     }
     if (request.method === 'POST' && url.pathname === '/api/runs') {
       const { playerId } = await readJson(request);
