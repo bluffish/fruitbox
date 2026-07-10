@@ -2,7 +2,7 @@
 
 ## First mode: private group room
 
-Two to eight friends join a private room, receive the same generated 10×17 board, and race for 120 seconds. Each player has an independent board and score. The higher verified score wins; a full-board clear wins ties by the faster server-recorded completion time. If no one clears and the top scores tie, the room result is a draw.
+One to eight players join a private room, receive the same generated 10×17 board, and race for 120 seconds. A room may start with one player for practice or testing. Each player has an independent board and score. The higher verified score wins; a full-board clear wins ties by the faster server-recorded completion time. If no one clears and the top scores tie, the room result is a draw.
 
 This is deliberately not co-op. A shared board introduces simultaneous-move conflicts, turn rules, and a different scoring model, so it should be a later mode rather than a compromise in the first release.
 
@@ -12,8 +12,8 @@ This is deliberately not co-op. A shared board introduces simultaneous-move conf
 Create room → share room link → friends join → arm room → everyone ready → 5-second countdown → play → result
 ```
 
-- **Create room:** creates a private room with a six-character join code and a maximum of eight seats.
-- **Share:** host copies a URL such as `/room/AB12CD`.
+- **Create room:** creates an open room with a six-character join code and a maximum of eight seats.
+- **Discover or share:** friends can click the host's name in the open-room list, copy a URL such as `/room/AB12CD`, or enter the code manually.
 - **Open lobby:** friends can join, leave, and choose a ready state. The host sees the roster and can set the room to *start when ready*.
 - **Armed lobby:** no additional players may join. When every seated player is ready, the server begins a five-second countdown.
 - **Countdown:** server chooses a start timestamp ahead of time, so every browser begins on the same clock.
@@ -43,7 +43,7 @@ open → armed → countdown → live → finished → archived
 
 | State | Server behavior |
 | --- | --- |
-| open | Accept 2–8 friends, allow roster changes and ready toggles. |
+| open | Accept 1–8 players, allow roster changes and ready toggles. |
 | armed | Lock the roster; begin a countdown automatically when every seat is ready. |
 | countdown | Announce the server start time; a player becoming unready returns the room to armed. |
 | live | Validate moves, broadcast room standings, reject late/duplicate moves. |

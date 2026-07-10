@@ -4,7 +4,8 @@ import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { BOARD_SIZE, ROUND_MS, validateReplay } from './src/game-engine.js';
+import { WebSocketServer } from 'ws';
+import { applyMove, BOARD_SIZE, generateBoard, ROUND_MS, validateReplay } from './src/game-engine.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -45,6 +46,10 @@ const updatePlayerName = db.prepare('UPDATE players SET display_name = ? WHERE i
 const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at) VALUES (?, ?, ?, ?)');
 const getRun = db.prepare('SELECT * FROM runs WHERE id = ?');
 const finishRun = db.prepare('UPDATE runs SET finished_at = ?, score = ?, duration_ms = ?, moves_json = ?, verified = 1 WHERE id = ?');
+const insertVerifiedRun = db.prepare(`
+  INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+`);
 const leaderboard = db.prepare(`
   SELECT players.display_name AS displayName, runs.score, runs.duration_ms AS durationMs, runs.finished_at AS finishedAt
   FROM runs JOIN players ON players.id = runs.player_id
@@ -102,6 +107,90 @@ function playerFor(id) {
   return createPlayer();
 }
 
+const rooms = new Map();
+const roomConnections = new Map();
+const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function createRoomCode() {
+  let code;
+  do code = Array.from({ length: 6 }, () => ROOM_ALPHABET[randomInt(ROOM_ALPHABET.length)]).join('');
+  while (rooms.has(code));
+  return code;
+}
+
+function roomSnapshot(room, viewerId) {
+  const connections = roomConnections.get(room.code) || new Set();
+  const players = [...room.players.values()]
+    .sort((a, b) => b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
+    .map(({ id, displayName, ready, score, completionMs, seat }) => ({
+      id, displayName, ready, score, completionMs, seat,
+      connected: [...connections].some((socket) => socket.playerId === id && socket.readyState === 1),
+    }));
+  return {
+    code: room.code, status: room.status, hostPlayerId: room.hostPlayerId,
+    maxPlayers: room.maxPlayers, seed: room.seed, startsAt: room.startsAt,
+    finishedAt: room.finishedAt, serverNow: Date.now(), players,
+    board: room.players.get(viewerId)?.board || null,
+  };
+}
+
+function sendRoom(socket, room) {
+  if (socket.readyState === 1) socket.send(JSON.stringify({ type: 'room', room: roomSnapshot(room, socket.playerId) }));
+}
+
+function broadcastRoom(room) {
+  for (const socket of roomConnections.get(room.code) || []) sendRoom(socket, room);
+}
+
+function finishMultiplayerRoom(room) {
+  if (room.status === 'finished') return;
+  clearTimeout(room.finishTimer);
+  room.status = 'finished';
+  room.finishedAt = Date.now();
+  for (const player of room.players.values()) {
+    insertVerifiedRun.run(
+      randomUUID(), player.id, room.seed, room.startsAt, room.finishedAt,
+      player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves),
+    );
+  }
+  broadcastRoom(room);
+}
+
+function beginRoomCountdown(room) {
+  if (room.status !== 'armed' || room.players.size < 1 || ![...room.players.values()].every((player) => player.ready)) return;
+  room.status = 'countdown';
+  room.seed = randomInt(1, 2_147_483_647);
+  room.startsAt = Date.now() + 5_000;
+  broadcastRoom(room);
+  room.startTimer = setTimeout(() => {
+    if (room.status !== 'countdown') return;
+    room.status = 'live';
+    for (const player of room.players.values()) {
+      Object.assign(player, {
+        board: generateBoard(room.seed), score: 0, moves: [], lastMoveId: 0, completionMs: null,
+      });
+    }
+    broadcastRoom(room);
+    room.finishTimer = setTimeout(() => finishMultiplayerRoom(room), ROUND_MS);
+  }, Math.max(0, room.startsAt - Date.now()));
+}
+
+function getRoom(code) {
+  const room = rooms.get(String(code || '').toUpperCase());
+  if (!room) throw new Error('Room not found.');
+  return room;
+}
+
+function addPlayerToRoom(room, player) {
+  if (room.players.has(player.id)) return;
+  if (room.status !== 'open') throw new Error('This room is no longer accepting players.');
+  if (room.players.size >= room.maxPlayers) throw new Error('This room is full.');
+  room.players.set(player.id, {
+    ...player, seat: room.players.size, ready: false, score: 0,
+    board: null, moves: [], lastMoveId: 0, completionMs: null,
+  });
+}
+
 async function serveFile(requestPath, response) {
   const relativePath = requestPath === '/' ? 'index.html' : normalize(requestPath).replace(/^([.][.][/\\])+/, '');
   const path = join(DIST_DIR, relativePath);
@@ -137,6 +226,76 @@ const server = createServer(async (request, response) => {
       updatePlayerName.run(player.displayName, player.id);
       return json(response, 200, player);
     }
+    if (request.method === 'POST' && url.pathname === '/api/rooms') {
+      const { playerId } = await readJson(request);
+      const player = playerFor(playerId);
+      const code = createRoomCode();
+      const room = {
+        code, hostPlayerId: player.id, maxPlayers: 8, status: 'open', seed: null,
+        createdAt: Date.now(), startsAt: null, finishedAt: null, players: new Map(), startTimer: null, finishTimer: null,
+      };
+      addPlayerToRoom(room, player);
+      rooms.set(code, room);
+      return json(response, 201, { room: roomSnapshot(room, player.id), player });
+    }
+    if (request.method === 'GET' && url.pathname === '/api/rooms') {
+      const openRooms = [...rooms.values()]
+        .filter((room) => {
+          const hostIsConnected = [...(roomConnections.get(room.code) || [])]
+            .some((socket) => socket.playerId === room.hostPlayerId && socket.readyState === 1);
+          return room.status === 'open' && room.players.size < room.maxPlayers && hostIsConnected;
+        })
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((room) => ({
+          code: room.code,
+          hostName: room.players.get(room.hostPlayerId)?.displayName || 'unknown',
+          playerCount: room.players.size,
+          maxPlayers: room.maxPlayers,
+          createdAt: room.createdAt,
+        }));
+      return json(response, 200, { rooms: openRooms });
+    }
+    if (request.method === 'POST' && /^\/api\/rooms\/[^/]+\/join$/.test(url.pathname)) {
+      const { playerId } = await readJson(request);
+      const room = getRoom(url.pathname.split('/')[3]);
+      const player = playerFor(playerId);
+      addPlayerToRoom(room, player);
+      broadcastRoom(room);
+      return json(response, 200, { room: roomSnapshot(room, player.id), player });
+    }
+    if (request.method === 'POST' && /^\/api\/rooms\/[^/]+\/ready$/.test(url.pathname)) {
+      const room = getRoom(url.pathname.split('/')[3]);
+      const { playerId, ready } = await readJson(request);
+      const player = room.players.get(playerId);
+      if (!player || !['open', 'armed'].includes(room.status)) throw new Error('Ready state cannot be changed now.');
+      player.ready = Boolean(ready);
+      broadcastRoom(room);
+      beginRoomCountdown(room);
+      return json(response, 200, { room: roomSnapshot(room, playerId) });
+    }
+    if (request.method === 'POST' && /^\/api\/rooms\/[^/]+\/arm$/.test(url.pathname)) {
+      const room = getRoom(url.pathname.split('/')[3]);
+      const { playerId } = await readJson(request);
+      if (room.hostPlayerId !== playerId || room.status !== 'open') throw new Error('Only the host can arm this room.');
+      room.status = 'armed';
+      broadcastRoom(room);
+      beginRoomCountdown(room);
+      return json(response, 200, { room: roomSnapshot(room, playerId) });
+    }
+    if (request.method === 'POST' && /^\/api\/rooms\/[^/]+\/rematch$/.test(url.pathname)) {
+      const room = getRoom(url.pathname.split('/')[3]);
+      const { playerId } = await readJson(request);
+      if (room.hostPlayerId !== playerId || room.status !== 'finished') throw new Error('Only the host can start a rematch.');
+      room.status = 'open';
+      room.seed = null;
+      room.startsAt = null;
+      room.finishedAt = null;
+      for (const player of room.players.values()) {
+        Object.assign(player, { ready: false, score: 0, board: null, moves: [], lastMoveId: 0, completionMs: null });
+      }
+      broadcastRoom(room);
+      return json(response, 200, { room: roomSnapshot(room, playerId) });
+    }
     if (request.method === 'POST' && url.pathname === '/api/runs') {
       const { playerId } = await readJson(request);
       const player = playerFor(playerId);
@@ -167,6 +326,48 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     const status = error instanceof SyntaxError ? 400 : 422;
     return json(response, status, { error: error.message || 'Unable to process this request.' });
+  }
+});
+
+const webSockets = new WebSocketServer({ server, path: '/ws' });
+webSockets.on('connection', (socket, request) => {
+  try {
+    const url = new URL(request.url, 'http://localhost');
+    const room = getRoom(url.searchParams.get('room'));
+    const playerId = url.searchParams.get('player');
+    if (!room.players.has(playerId)) throw new Error('You are not in this room.');
+    socket.playerId = playerId;
+    socket.roomCode = room.code;
+    if (!roomConnections.has(room.code)) roomConnections.set(room.code, new Set());
+    roomConnections.get(room.code).add(socket);
+    broadcastRoom(room);
+
+    socket.on('message', (raw) => {
+      try {
+        const message = JSON.parse(raw.toString());
+        if (message.type !== 'move' || room.status !== 'live') return;
+        const player = room.players.get(playerId);
+        if (!Number.isInteger(message.moveId) || message.moveId <= player.lastMoveId) throw new Error('Duplicate move.');
+        const movedAt = Date.now() - room.startsAt;
+        if (movedAt < 0 || movedAt > ROUND_MS) throw new Error('Move outside the round.');
+        const result = applyMove(player.board, message.cells);
+        player.lastMoveId = message.moveId;
+        player.score += result.cleared;
+        player.moves.push({ at: Math.min(movedAt, ROUND_MS), cells: message.cells });
+        if (player.score === BOARD_SIZE && !player.completionMs) player.completionMs = movedAt;
+        broadcastRoom(room);
+        if ([...room.players.values()].every((entry) => entry.score === BOARD_SIZE)) finishMultiplayerRoom(room);
+      } catch (error) {
+        socket.send(JSON.stringify({ type: 'error', message: error.message }));
+        sendRoom(socket, room);
+      }
+    });
+    socket.on('close', () => {
+      roomConnections.get(room.code)?.delete(socket);
+      broadcastRoom(room);
+    });
+  } catch (error) {
+    socket.close(1008, error.message);
   }
 });
 

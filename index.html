@@ -13,7 +13,10 @@
   <body>
     <main class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Fruitbox home">fruitbox</a>
+        <div class="brand-group">
+          <a class="brand" href="/" aria-label="Fruitbox home">fruitbox</a>
+          <button id="room-nav" class="mode-link" type="button">multiplayer</button>
+        </div>
         <div class="status" aria-label="Game status">
           <span><b id="timer">02:00</b> left</span>
           <span><b id="score">0</b> score</span>
@@ -21,7 +24,40 @@
         </div>
       </header>
 
-      <section class="play-area" aria-label="Fruitbox game">
+      <section id="room-screen" class="room-screen" hidden>
+        <div id="room-entry" class="room-entry">
+          <p class="room-kicker">Play with friends</p>
+          <h1>Room</h1>
+          <button id="create-room" class="room-primary" type="button">create room</button>
+          <form id="join-room-form" class="join-room-form">
+            <input id="room-code-input" aria-label="Room code" maxlength="6" placeholder="room code" autocomplete="off" />
+            <button type="submit">join</button>
+          </form>
+          <p id="room-entry-error" class="room-error"></p>
+          <div class="open-rooms-heading">
+            <span>open rooms</span>
+            <button id="refresh-rooms" type="button">refresh</button>
+          </div>
+          <ol id="open-rooms" class="open-rooms">
+            <li class="open-rooms-empty">looking for rooms…</li>
+          </ol>
+        </div>
+        <div id="room-lobby" class="room-lobby" hidden>
+          <div class="room-heading">
+            <div><span>room</span><strong id="room-code"></strong></div>
+            <button id="copy-room" type="button">copy link</button>
+          </div>
+          <p id="room-state" class="room-state"></p>
+          <ol id="room-roster" class="room-roster"></ol>
+          <div class="room-controls">
+            <button id="ready-room" type="button">ready</button>
+            <button id="arm-room" class="room-primary" type="button">start when ready</button>
+          </div>
+          <p id="room-error" class="room-error"></p>
+        </div>
+      </section>
+
+      <section id="play-area" class="play-area" aria-label="Fruitbox game">
         <div class="board-frame">
           <div id="board" class="board" role="grid" aria-label="Fruit grid">
             <div id="selection-box" class="selection-box" aria-hidden="true"></div>
@@ -42,9 +78,13 @@
           <button id="next-missed" type="button" hidden>next</button>
           <button id="hide-missed" type="button" hidden>hide</button>
         </div>
+        <aside id="room-standings" class="room-standings" hidden>
+          <div><span>room</span><b id="standings-code"></b></div>
+          <ol id="standings-list"></ol>
+        </aside>
       </section>
 
-      <section class="leaderboard" aria-labelledby="leaderboard-title">
+      <section id="global-leaderboard" class="leaderboard" aria-labelledby="leaderboard-title">
         <div class="leaderboard-heading">
           <h2 id="leaderboard-title">All-time</h2>
           <span>Score · time</span>

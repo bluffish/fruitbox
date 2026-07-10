@@ -20,6 +20,23 @@ const reviewLabel = document.querySelector('#review-label');
 const showMissedButton = document.querySelector('#show-missed');
 const nextMissedButton = document.querySelector('#next-missed');
 const hideMissedButton = document.querySelector('#hide-missed');
+const appShell = document.querySelector('.app-shell');
+const playArea = document.querySelector('#play-area');
+const globalLeaderboard = document.querySelector('#global-leaderboard');
+const roomScreen = document.querySelector('#room-screen');
+const roomEntry = document.querySelector('#room-entry');
+const roomLobby = document.querySelector('#room-lobby');
+const roomCodeEl = document.querySelector('#room-code');
+const roomStateEl = document.querySelector('#room-state');
+const roomRoster = document.querySelector('#room-roster');
+const roomError = document.querySelector('#room-error');
+const roomEntryError = document.querySelector('#room-entry-error');
+const readyRoomButton = document.querySelector('#ready-room');
+const armRoomButton = document.querySelector('#arm-room');
+const roomStandings = document.querySelector('#room-standings');
+const standingsCode = document.querySelector('#standings-code');
+const standingsList = document.querySelector('#standings-list');
+const openRoomsList = document.querySelector('#open-rooms');
 
 let board = [];
 let cells = [];
@@ -37,6 +54,13 @@ let startRequestId = 0;
 let currentPlayer = null;
 let missedMoves = [];
 let hintIndex = -1;
+let gameMode = 'solo';
+let activeRoom = null;
+let roomSocket = null;
+let roomGameStarted = false;
+let roomCountdownTimer = null;
+let roomMoveId = 0;
+let roomListTimer = null;
 
 function formatTime(value) {
   return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
@@ -186,10 +210,12 @@ function endGame() {
 }
 
 function tick() {
-  const elapsed = performance.now() - startedAt;
-  secondsLeft = Math.max(0, Math.ceil((ROUND_MS - elapsed) / 1000));
+  const remainingMs = gameMode === 'room' && activeRoom
+    ? activeRoom.startsAt + ROUND_MS - Date.now()
+    : ROUND_MS - (performance.now() - startedAt);
+  secondsLeft = Math.max(0, Math.ceil(remainingMs / 1000));
   timerEl.textContent = formatTime(secondsLeft);
-  if (secondsLeft <= 0) endGame();
+  if (secondsLeft <= 0 && gameMode === 'solo') endGame();
 }
 
 function renderBoard() {
@@ -218,6 +244,217 @@ async function request(path, options = {}) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || 'Request failed.');
   return payload;
+}
+
+function setRoomUrl(code = '') {
+  history.pushState({}, '', code ? `/room/${code}` : '/room');
+}
+
+function showRoomEntry() {
+  gameMode = 'room';
+  playing = false;
+  clearInterval(timerId);
+  roomScreen.hidden = false;
+  roomEntry.hidden = false;
+  roomLobby.hidden = true;
+  playArea.hidden = true;
+  globalLeaderboard.hidden = true;
+  document.querySelector('.status').hidden = true;
+  appShell.classList.remove('room-playing');
+  setRoomUrl();
+  loadOpenRooms();
+  clearInterval(roomListTimer);
+  roomListTimer = setInterval(loadOpenRooms, 2_500);
+}
+
+async function loadOpenRooms() {
+  if (roomEntry.hidden) return;
+  try {
+    const { rooms } = await request('/api/rooms');
+    openRoomsList.replaceChildren();
+    if (!rooms.length) {
+      const empty = document.createElement('li');
+      empty.className = 'open-rooms-empty';
+      empty.textContent = 'no rooms open';
+      openRoomsList.append(empty);
+      return;
+    }
+    rooms.forEach((room) => {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      const name = document.createElement('span');
+      const count = document.createElement('b');
+      name.textContent = `${room.hostName}’s room`;
+      count.textContent = `${room.playerCount} / ${room.maxPlayers}`;
+      button.append(name, count);
+      button.addEventListener('click', () => enterRoom(room.code));
+      item.append(button);
+      openRoomsList.append(item);
+    });
+  } catch {
+    openRoomsList.innerHTML = '<li class="open-rooms-empty">rooms unavailable</li>';
+  }
+}
+
+function roomPlayer() {
+  return activeRoom?.players.find((player) => player.id === currentPlayer?.id);
+}
+
+function renderStandings() {
+  if (!activeRoom) return;
+  standingsCode.textContent = activeRoom.code;
+  standingsList.replaceChildren();
+  activeRoom.players.forEach((player, index) => {
+    const row = document.createElement('li');
+    if (player.id === currentPlayer.id) row.classList.add('you');
+    const place = document.createElement('span');
+    const name = document.createElement('b');
+    const points = document.createElement('strong');
+    place.textContent = String(index + 1).padStart(2, '0');
+    name.textContent = player.id === currentPlayer.id ? `${player.displayName} · you` : player.displayName;
+    points.textContent = player.score;
+    row.append(place, name, points);
+    standingsList.append(row);
+  });
+}
+
+function startRoomBoard() {
+  if (!activeRoom?.board) return;
+  if (!roomGameStarted) {
+    roomGameStarted = true;
+    gameMode = 'room';
+    board = activeRoom.board.map((row) => [...row]);
+    score = roomPlayer()?.score || 0;
+    roomMoveId = 0;
+    missedMoves = [];
+    hintIndex = -1;
+    gameOverEl.hidden = true;
+    reviewToolbar.hidden = true;
+    roomScreen.hidden = true;
+    playArea.hidden = false;
+    globalLeaderboard.hidden = true;
+    roomStandings.hidden = false;
+    document.querySelector('.status').hidden = false;
+    document.querySelector('#new-game').hidden = true;
+    appShell.classList.add('room-playing');
+    playing = true;
+    renderBoard();
+    clearInterval(timerId);
+    timerId = setInterval(tick, 250);
+  }
+  score = roomPlayer()?.score || score;
+  scoreEl.textContent = score;
+  renderStandings();
+}
+
+function finishRoomBoard() {
+  if (!roomGameStarted || !activeRoom) return;
+  playing = false;
+  clearInterval(timerId);
+  if (activeRoom.board) {
+    board = activeRoom.board.map((row) => [...row]);
+    renderBoard();
+  }
+  score = roomPlayer()?.score || 0;
+  scoreEl.textContent = score;
+  finalScoreEl.textContent = score;
+  missedMoves = findMissedMoves();
+  hintIndex = -1;
+  highlightMissedButton.hidden = missedMoves.length === 0;
+  reviewToolbar.hidden = true;
+  document.querySelector('#play-again').textContent = activeRoom.hostPlayerId === currentPlayer.id ? 'rematch' : 'waiting for host';
+  document.querySelector('#play-again').disabled = activeRoom.hostPlayerId !== currentPlayer.id;
+  gameOverEl.hidden = false;
+  renderStandings();
+}
+
+function updateCountdown() {
+  if (!activeRoom || activeRoom.status !== 'countdown') return;
+  const remaining = Math.max(0, Math.ceil((activeRoom.startsAt - Date.now()) / 1000));
+  roomStateEl.textContent = `starting in ${remaining}`;
+}
+
+function renderRoomLobby() {
+  if (!activeRoom) return;
+  roomScreen.hidden = false;
+  roomEntry.hidden = true;
+  roomLobby.hidden = false;
+  playArea.hidden = true;
+  globalLeaderboard.hidden = true;
+  document.querySelector('.status').hidden = true;
+  appShell.classList.remove('room-playing');
+  clearInterval(roomListTimer);
+  roomCodeEl.textContent = activeRoom.code;
+  roomRoster.replaceChildren();
+  [...activeRoom.players].sort((a, b) => a.seat - b.seat).forEach((player) => {
+    const row = document.createElement('li');
+    const name = document.createElement('span');
+    const state = document.createElement('b');
+    name.textContent = player.displayName;
+    if (player.id === activeRoom.hostPlayerId) name.append(' · host');
+    state.textContent = player.ready ? 'ready' : 'not ready';
+    state.classList.toggle('ready', player.ready);
+    row.append(name, state);
+    roomRoster.append(row);
+  });
+  const me = roomPlayer();
+  readyRoomButton.textContent = me?.ready ? 'not ready' : 'ready';
+  readyRoomButton.disabled = !['open', 'armed'].includes(activeRoom.status);
+  armRoomButton.hidden = activeRoom.hostPlayerId !== currentPlayer.id || activeRoom.status !== 'open';
+  armRoomButton.disabled = activeRoom.players.length < 1;
+  if (activeRoom.status === 'open') roomStateEl.textContent = `${activeRoom.players.length} / ${activeRoom.maxPlayers} players · waiting for host`;
+  if (activeRoom.status === 'armed') roomStateEl.textContent = 'room locked · waiting for everyone';
+  if (activeRoom.status === 'countdown') {
+    updateCountdown();
+    clearInterval(roomCountdownTimer);
+    roomCountdownTimer = setInterval(updateCountdown, 200);
+  }
+}
+
+function handleRoomSnapshot(snapshot) {
+  activeRoom = snapshot;
+  if (['open', 'armed', 'countdown'].includes(snapshot.status)) {
+    if (roomGameStarted) {
+      roomGameStarted = false;
+      gameOverEl.hidden = true;
+      roomStandings.hidden = true;
+      document.querySelector('#play-again').disabled = false;
+      document.querySelector('#play-again').textContent = 'again';
+    }
+    renderRoomLobby();
+  } else if (snapshot.status === 'live') {
+    clearInterval(roomCountdownTimer);
+    startRoomBoard();
+  } else if (snapshot.status === 'finished') {
+    finishRoomBoard();
+  }
+}
+
+function connectRoomSocket(code) {
+  roomSocket?.close();
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  roomSocket = new WebSocket(`${protocol}//${location.host}/ws?room=${code}&player=${currentPlayer.id}`);
+  roomSocket.addEventListener('message', (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'room') handleRoomSnapshot(message.room);
+    if (message.type === 'error') roomError.textContent = message.message;
+  });
+}
+
+async function enterRoom(code) {
+  roomEntryError.textContent = '';
+  try {
+    const response = await request(`/api/rooms/${code.toUpperCase()}/join`, {
+      method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
+    });
+    activeRoom = response.room;
+    setRoomUrl(activeRoom.code);
+    connectRoomSocket(activeRoom.code);
+    renderRoomLobby();
+  } catch (error) {
+    roomEntryError.textContent = error.message;
+    showRoomEntry();
+  }
 }
 
 function formatDuration(durationMs) {
@@ -257,6 +494,7 @@ async function loadLeaderboard() {
 async function startGame() {
   clearInterval(timerId);
   const requestId = ++startRequestId;
+  gameMode = 'solo';
   playing = false;
   timerEl.textContent = '—';
   score = 0;
@@ -265,6 +503,13 @@ async function startGame() {
   missedMoves = [];
   hintIndex = -1;
   reviewToolbar.hidden = true;
+  roomScreen.hidden = true;
+  playArea.hidden = false;
+  globalLeaderboard.hidden = false;
+  roomStandings.hidden = true;
+  document.querySelector('.status').hidden = false;
+  document.querySelector('#new-game').hidden = false;
+  appShell.classList.remove('room-playing');
   clearSelection();
   try {
     const playerId = currentPlayer?.id || localStorage.getItem('fruitbox-player-id');
@@ -326,7 +571,10 @@ function finishSelection(event) {
     score += selected.length;
     scoreEl.textContent = score;
     moves.push({ at: Math.min(Math.round(performance.now() - startedAt), ROUND_MS), cells: selected });
-    if (score === BOARD_SIZE) endGame();
+    if (gameMode === 'room') {
+      roomMoveId += 1;
+      roomSocket?.send(JSON.stringify({ type: 'move', moveId: roomMoveId, cells: selected }));
+    } else if (score === BOARD_SIZE) endGame();
   }
   clearSelection();
 }
@@ -352,7 +600,13 @@ async function submitRun() {
 boardFrameEl.addEventListener('pointerup', finishSelection);
 boardFrameEl.addEventListener('pointercancel', clearSelection);
 document.querySelector('#new-game').addEventListener('click', startGame);
-document.querySelector('#play-again').addEventListener('click', startGame);
+document.querySelector('#play-again').addEventListener('click', async () => {
+  if (gameMode !== 'room') return startGame();
+  if (activeRoom?.hostPlayerId !== currentPlayer.id) return;
+  await request(`/api/rooms/${activeRoom.code}/rematch`, {
+    method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
+  });
+});
 document.querySelector('#close-results').addEventListener('click', () => {
   gameOverEl.hidden = true;
   renderReviewToolbar();
@@ -365,7 +619,7 @@ showMissedButton.addEventListener('click', () => showMissedMove());
 nextMissedButton.addEventListener('click', () => showMissedMove(hintIndex + 1));
 hideMissedButton.addEventListener('click', hideMissedMove);
 window.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space' || event.repeat || usernameDialog.open) return;
+  if (event.code !== 'Space' || event.repeat || usernameDialog.open || gameMode === 'room') return;
   event.preventDefault();
   startGame();
 });
@@ -380,7 +634,7 @@ usernameForm.addEventListener('submit', async (event) => {
       : await request('/api/players', { method: 'POST', body: JSON.stringify({ displayName }) });
     localStorage.setItem('fruitbox-player-id', currentPlayer.id);
     usernameDialog.close();
-    startGame();
+    routeAfterPlayer();
   } catch (error) {
     usernameError.textContent = error.message;
   }
@@ -401,8 +655,59 @@ async function initializePlayer() {
     setTimeout(() => usernameInput.focus(), 0);
     return;
   }
+  routeAfterPlayer();
+}
+
+function routeAfterPlayer() {
+  const roomMatch = location.pathname.match(/^\/room\/([A-Z0-9]{6})$/i);
+  if (roomMatch) return enterRoom(roomMatch[1]);
+  if (location.pathname === '/room') return showRoomEntry();
   startGame();
 }
+
+document.querySelector('#room-nav').addEventListener('click', showRoomEntry);
+document.querySelector('#refresh-rooms').addEventListener('click', loadOpenRooms);
+document.querySelector('#create-room').addEventListener('click', async () => {
+  roomEntryError.textContent = '';
+  try {
+    const response = await request('/api/rooms', {
+      method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
+    });
+    activeRoom = response.room;
+    setRoomUrl(activeRoom.code);
+    connectRoomSocket(activeRoom.code);
+    renderRoomLobby();
+  } catch (error) {
+    roomEntryError.textContent = error.message;
+  }
+});
+document.querySelector('#join-room-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const code = document.querySelector('#room-code-input').value.trim();
+  if (code) enterRoom(code);
+});
+document.querySelector('#copy-room').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(`${location.origin}/room/${activeRoom.code}`);
+  document.querySelector('#copy-room').textContent = 'copied';
+  setTimeout(() => { document.querySelector('#copy-room').textContent = 'copy link'; }, 1200);
+});
+readyRoomButton.addEventListener('click', async () => {
+  roomError.textContent = '';
+  try {
+    await request(`/api/rooms/${activeRoom.code}/ready`, {
+      method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id, ready: !roomPlayer()?.ready }),
+    });
+  } catch (error) { roomError.textContent = error.message; }
+});
+armRoomButton.addEventListener('click', async () => {
+  roomError.textContent = '';
+  try {
+    await request(`/api/rooms/${activeRoom.code}/arm`, {
+      method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
+    });
+  } catch (error) { roomError.textContent = error.message; }
+});
+window.addEventListener('popstate', () => location.reload());
 
 loadLeaderboard();
 initializePlayer();

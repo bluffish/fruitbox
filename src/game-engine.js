@@ -23,6 +23,40 @@ export function generateBoard(seed) {
   );
 }
 
+export function applyMove(board, cells) {
+  if (!Array.isArray(cells) || cells.length === 0) throw new Error('Invalid move.');
+  const keys = new Set();
+  const normalized = cells.map(({ row, col }) => {
+    if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= ROWS || col < 0 || col >= COLS) {
+      throw new Error('Invalid move coordinates.');
+    }
+    const key = `${row}:${col}`;
+    if (keys.has(key)) throw new Error('Duplicate move coordinates.');
+    if (board[row][col] === null) throw new Error('That apple was already cleared.');
+    keys.add(key);
+    return { row, col };
+  });
+
+  const top = Math.min(...normalized.map((cell) => cell.row));
+  const bottom = Math.max(...normalized.map((cell) => cell.row));
+  const left = Math.min(...normalized.map((cell) => cell.col));
+  const right = Math.max(...normalized.map((cell) => cell.col));
+  const expected = [];
+  for (let row = top; row <= bottom; row += 1) {
+    for (let col = left; col <= right; col += 1) {
+      if (board[row][col] !== null) expected.push({ row, col });
+    }
+  }
+  if (expected.length !== normalized.length || expected.some(({ row, col }) => !keys.has(`${row}:${col}`))) {
+    throw new Error('A move must contain every remaining apple in one rectangle.');
+  }
+
+  const total = normalized.reduce((sum, { row, col }) => sum + board[row][col], 0);
+  if (total !== 10) throw new Error('A move does not total 10.');
+  normalized.forEach(({ row, col }) => { board[row][col] = null; });
+  return { cleared: normalized.length, board };
+}
+
 export function validateReplay(seed, moves) {
   if (!Array.isArray(moves) || moves.length > BOARD_SIZE) throw new Error('Invalid move list.');
   const board = generateBoard(seed);
@@ -34,35 +68,7 @@ export function validateReplay(seed, moves) {
     if (!Number.isInteger(move.at) || move.at < previousAt || move.at > ROUND_MS) throw new Error('Invalid move time.');
     previousAt = move.at;
 
-    const keys = new Set();
-    const cells = move.cells.map(({ row, col }) => {
-      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= ROWS || col < 0 || col >= COLS) {
-        throw new Error('Invalid move coordinates.');
-      }
-      const key = `${row}:${col}`;
-      if (keys.has(key)) throw new Error('Duplicate move coordinates.');
-      keys.add(key);
-      return { row, col };
-    });
-
-    const top = Math.min(...cells.map((cell) => cell.row));
-    const bottom = Math.max(...cells.map((cell) => cell.row));
-    const left = Math.min(...cells.map((cell) => cell.col));
-    const right = Math.max(...cells.map((cell) => cell.col));
-    const expected = [];
-    for (let row = top; row <= bottom; row += 1) {
-      for (let col = left; col <= right; col += 1) {
-        if (board[row][col] !== null) expected.push({ row, col });
-      }
-    }
-    if (expected.length !== cells.length || expected.some(({ row, col }) => !keys.has(`${row}:${col}`))) {
-      throw new Error('A move must contain every remaining apple in one rectangle.');
-    }
-
-    const total = cells.reduce((sum, { row, col }) => sum + board[row][col], 0);
-    if (total !== 10) throw new Error('A move does not total 10.');
-    cells.forEach(({ row, col }) => { board[row][col] = null; });
-    score += cells.length;
+    score += applyMove(board, move.cells).cleared;
   }
 
   return { score, cleared: score === BOARD_SIZE };
