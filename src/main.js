@@ -20,6 +20,7 @@ const reviewLabel = document.querySelector('#review-label');
 const showMissedButton = document.querySelector('#show-missed');
 const nextMissedButton = document.querySelector('#next-missed');
 const hideMissedButton = document.querySelector('#hide-missed');
+const reviewRematchButton = document.querySelector('#review-rematch');
 const appShell = document.querySelector('.app-shell');
 const playArea = document.querySelector('#play-area');
 const globalLeaderboard = document.querySelector('#global-leaderboard');
@@ -154,9 +155,16 @@ function findMissedMoves() {
 }
 
 function renderReviewToolbar() {
+  const roomFinished = gameMode === 'room' && activeRoom?.status === 'finished';
+  reviewRematchButton.hidden = !roomFinished;
+  if (roomFinished) {
+    reviewRematchButton.textContent = activeRoom.hostPlayerId === currentPlayer.id ? 'rematch' : 'waiting for host';
+    reviewRematchButton.disabled = activeRoom.hostPlayerId !== currentPlayer.id;
+  }
   if (!missedMoves.length) {
-    reviewToolbar.hidden = true;
+    reviewToolbar.hidden = !roomFinished;
     highlightMissedButton.hidden = true;
+    if (roomFinished) reviewLabel.textContent = 'round finished';
     return;
   }
   reviewToolbar.hidden = false;
@@ -312,7 +320,7 @@ function renderStandings() {
     const points = document.createElement('strong');
     place.textContent = String(index + 1).padStart(2, '0');
     name.textContent = player.id === currentPlayer.id ? `${player.displayName} · you` : player.displayName;
-    points.textContent = player.score;
+    points.textContent = `${player.score} · ${player.wins || 0}w`;
     row.append(place, name, points);
     standingsList.append(row);
   });
@@ -392,7 +400,8 @@ function renderRoomLobby() {
     const state = document.createElement('b');
     name.textContent = player.displayName;
     if (player.id === activeRoom.hostPlayerId) name.append(' · host');
-    state.textContent = player.ready ? 'ready' : 'not ready';
+    const wins = `${player.wins || 0} ${player.wins === 1 ? 'win' : 'wins'}`;
+    state.textContent = `${wins} · ${player.ready ? 'ready' : 'not ready'}`;
     state.classList.toggle('ready', player.ready);
     row.append(name, state);
     roomRoster.append(row);
@@ -602,10 +611,7 @@ boardFrameEl.addEventListener('pointercancel', clearSelection);
 document.querySelector('#new-game').addEventListener('click', startGame);
 document.querySelector('#play-again').addEventListener('click', async () => {
   if (gameMode !== 'room') return startGame();
-  if (activeRoom?.hostPlayerId !== currentPlayer.id) return;
-  await request(`/api/rooms/${activeRoom.code}/rematch`, {
-    method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
-  });
+  return requestRoomRematch();
 });
 document.querySelector('#close-results').addEventListener('click', () => {
   gameOverEl.hidden = true;
@@ -618,6 +624,7 @@ highlightMissedButton.addEventListener('click', () => {
 showMissedButton.addEventListener('click', () => showMissedMove());
 nextMissedButton.addEventListener('click', () => showMissedMove(hintIndex + 1));
 hideMissedButton.addEventListener('click', hideMissedMove);
+reviewRematchButton.addEventListener('click', requestRoomRematch);
 window.addEventListener('keydown', (event) => {
   if (event.code !== 'Space' || event.repeat || usernameDialog.open || gameMode === 'room') return;
   event.preventDefault();
@@ -663,6 +670,18 @@ function routeAfterPlayer() {
   if (roomMatch) return enterRoom(roomMatch[1]);
   if (location.pathname === '/room') return showRoomEntry();
   startGame();
+}
+
+async function requestRoomRematch() {
+  if (activeRoom?.hostPlayerId !== currentPlayer.id || activeRoom.status !== 'finished') return;
+  roomError.textContent = '';
+  try {
+    await request(`/api/rooms/${activeRoom.code}/rematch`, {
+      method: 'POST', body: JSON.stringify({ playerId: currentPlayer.id }),
+    });
+  } catch (error) {
+    roomError.textContent = error.message;
+  }
 }
 
 document.querySelector('#room-nav').addEventListener('click', showRoomEntry);

@@ -122,8 +122,8 @@ function roomSnapshot(room, viewerId) {
   const connections = roomConnections.get(room.code) || new Set();
   const players = [...room.players.values()]
     .sort((a, b) => b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
-    .map(({ id, displayName, ready, score, completionMs, seat }) => ({
-      id, displayName, ready, score, completionMs, seat,
+    .map(({ id, displayName, ready, score, wins, completionMs, seat }) => ({
+      id, displayName, ready, score, wins, completionMs, seat,
       connected: [...connections].some((socket) => socket.playerId === id && socket.readyState === 1),
     }));
   return {
@@ -147,6 +147,13 @@ function finishMultiplayerRoom(room) {
   clearTimeout(room.finishTimer);
   room.status = 'finished';
   room.finishedAt = Date.now();
+  const highestScore = Math.max(...[...room.players.values()].map((player) => player.score));
+  let winners = [...room.players.values()].filter((player) => player.score === highestScore);
+  if (winners.length > 1 && highestScore === BOARD_SIZE) {
+    const fastest = Math.min(...winners.map((player) => player.completionMs || ROUND_MS));
+    winners = winners.filter((player) => (player.completionMs || ROUND_MS) === fastest);
+  }
+  if (room.players.size > 1 && winners.length === 1) winners[0].wins += 1;
   for (const player of room.players.values()) {
     insertVerifiedRun.run(
       randomUUID(), player.id, room.seed, room.startsAt, room.finishedAt,
@@ -186,7 +193,7 @@ function addPlayerToRoom(room, player) {
   if (room.status !== 'open') throw new Error('This room is no longer accepting players.');
   if (room.players.size >= room.maxPlayers) throw new Error('This room is full.');
   room.players.set(player.id, {
-    ...player, seat: room.players.size, ready: false, score: 0,
+    ...player, seat: room.players.size, ready: false, score: 0, wins: 0,
     board: null, moves: [], lastMoveId: 0, completionMs: null,
   });
 }

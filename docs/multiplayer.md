@@ -18,7 +18,7 @@ Create room → share room link → friends join → arm room → everyone ready
 - **Armed lobby:** no additional players may join. When every seated player is ready, the server begins a five-second countdown.
 - **Countdown:** server chooses a start timestamp ahead of time, so every browser begins on the same clock.
 - **Play:** each player sees their own identical board plus a compact, live-sorted score list for the room.
-- **Result:** winner, room standings, and a rematch button. Each completed player result also enters the normal global leaderboard as a verified run.
+- **Result:** winner, room standings, persistent room-series win counts, and a rematch button that remains accessible during missed-move review. Each completed player result also enters the normal global leaderboard as a verified run.
 
 The host must arm the room before readiness can trigger a countdown. This prevents a room from unexpectedly starting while a friend is still opening the invite link.
 
