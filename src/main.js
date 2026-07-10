@@ -136,7 +136,7 @@ function formatDuration(durationMs) {
 
 async function loadLeaderboard() {
   try {
-    const { entries } = await request('/api/leaderboard?limit=20');
+    const { entries } = await request('/api/leaderboard?limit=10');
     leaderboardEl.replaceChildren();
     if (!entries.length) {
       const empty = document.createElement('li');
