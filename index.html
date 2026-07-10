@@ -29,8 +29,17 @@
             <button id="close-results" class="close-results" type="button" aria-label="Close results and inspect board">×</button>
             <strong id="final-score">0</strong>
             <span>apples</span>
-            <button id="play-again" type="button">again</button>
+            <div class="result-actions">
+              <button id="highlight-missed" type="button" hidden>highlight missed</button>
+              <button id="play-again" type="button">again</button>
+            </div>
           </div>
+        </div>
+        <div id="review-toolbar" class="review-toolbar" hidden>
+          <span id="review-label"></span>
+          <button id="show-missed" type="button">highlight missed</button>
+          <button id="next-missed" type="button" hidden>next</button>
+          <button id="hide-missed" type="button" hidden>hide</button>
         </div>
       </section>
 

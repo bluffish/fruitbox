@@ -14,6 +14,12 @@ const usernameDialog = document.querySelector('#username-dialog');
 const usernameForm = document.querySelector('#username-form');
 const usernameInput = document.querySelector('#username-input');
 const usernameError = document.querySelector('#username-error');
+const highlightMissedButton = document.querySelector('#highlight-missed');
+const reviewToolbar = document.querySelector('#review-toolbar');
+const reviewLabel = document.querySelector('#review-label');
+const showMissedButton = document.querySelector('#show-missed');
+const nextMissedButton = document.querySelector('#next-missed');
+const hideMissedButton = document.querySelector('#hide-missed');
 
 let board = [];
 let cells = [];
@@ -29,6 +35,8 @@ let startedAt = 0;
 let submitting = false;
 let startRequestId = 0;
 let currentPlayer = null;
+let missedMoves = [];
+let hintIndex = -1;
 
 function formatTime(value) {
   return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
@@ -79,7 +87,88 @@ function clearSelection() {
   selectionStart = null;
   currentSelection = null;
   selectionBoxEl.hidden = true;
+  selectionBoxEl.classList.remove('valid', 'missed');
+  delete selectionBoxEl.dataset.label;
+}
+
+function rectangleTotal(prefix, top, left, bottom, right) {
+  return prefix[bottom + 1][right + 1] - prefix[top][right + 1] - prefix[bottom + 1][left] + prefix[top][left];
+}
+
+function makePrefix(mapper) {
+  const prefix = Array.from({ length: ROWS + 1 }, () => Array(COLS + 1).fill(0));
+  for (let row = 0; row < ROWS; row += 1) {
+    for (let col = 0; col < COLS; col += 1) {
+      prefix[row + 1][col + 1] = mapper(row, col) + prefix[row][col + 1] + prefix[row + 1][col] - prefix[row][col];
+    }
+  }
+  return prefix;
+}
+
+function findMissedMoves() {
+  const totals = makePrefix((row, col) => board[row][col] || 0);
+  const apples = makePrefix((row, col) => (board[row][col] === null ? 0 : 1));
+  const moves = [];
+  for (let top = 0; top < ROWS; top += 1) {
+    for (let bottom = top; bottom < ROWS; bottom += 1) {
+      for (let left = 0; left < COLS; left += 1) {
+        for (let right = left; right < COLS; right += 1) {
+          const count = rectangleTotal(apples, top, left, bottom, right);
+          if (count === 0 || rectangleTotal(totals, top, left, bottom, right) !== 10) continue;
+          // Keep only the canonical box around its apples. This avoids showing
+          // the same move repeatedly with a border of already-cleared cells.
+          const hasAppleOnEachEdge = rectangleTotal(apples, top, left, top, right) > 0
+            && rectangleTotal(apples, bottom, left, bottom, right) > 0
+            && rectangleTotal(apples, top, left, bottom, left) > 0
+            && rectangleTotal(apples, top, right, bottom, right) > 0;
+          if (hasAppleOnEachEdge) moves.push({ top, bottom, left, right, count, area: (bottom - top + 1) * (right - left + 1) });
+        }
+      }
+    }
+  }
+  return moves.sort((a, b) => b.count - a.count || a.area - b.area || a.top - b.top || a.left - b.left);
+}
+
+function renderReviewToolbar() {
+  if (!missedMoves.length) {
+    reviewToolbar.hidden = true;
+    highlightMissedButton.hidden = true;
+    return;
+  }
+  reviewToolbar.hidden = false;
+  const showingHint = hintIndex >= 0;
+  const move = missedMoves[hintIndex];
+  reviewLabel.textContent = showingHint
+    ? `missed move ${hintIndex + 1}/${missedMoves.length} · ${move.count} apples`
+    : `${missedMoves.length} missed move${missedMoves.length === 1 ? '' : 's'}`;
+  showMissedButton.hidden = showingHint;
+  nextMissedButton.hidden = !showingHint || missedMoves.length < 2;
+  hideMissedButton.hidden = !showingHint;
+}
+
+function hideMissedMove() {
+  hintIndex = -1;
+  selectionBoxEl.hidden = true;
+  selectionBoxEl.classList.remove('missed');
+  delete selectionBoxEl.dataset.label;
+  renderReviewToolbar();
+}
+
+function showMissedMove(index = 0) {
+  if (!missedMoves.length) return;
+  hintIndex = ((index % missedMoves.length) + missedMoves.length) % missedMoves.length;
+  const move = missedMoves[hintIndex];
+  const first = cells[move.top][move.left];
+  const last = cells[move.bottom][move.right];
+  selectionBoxEl.hidden = false;
   selectionBoxEl.classList.remove('valid');
+  selectionBoxEl.classList.add('missed');
+  selectionBoxEl.dataset.label = '10';
+  selectionBoxEl.style.left = `${first.offsetLeft - 3}px`;
+  selectionBoxEl.style.top = `${first.offsetTop - 3}px`;
+  selectionBoxEl.style.width = `${last.offsetLeft + last.offsetWidth - first.offsetLeft + 6}px`;
+  selectionBoxEl.style.height = `${last.offsetTop + last.offsetHeight - first.offsetTop + 6}px`;
+  renderReviewToolbar();
 }
 
 function endGame() {
@@ -87,6 +176,10 @@ function endGame() {
   playing = false;
   clearInterval(timerId);
   clearSelection();
+  missedMoves = findMissedMoves();
+  hintIndex = -1;
+  highlightMissedButton.hidden = missedMoves.length === 0;
+  reviewToolbar.hidden = true;
   finalScoreEl.textContent = score;
   gameOverEl.hidden = false;
   submitRun();
@@ -169,6 +262,9 @@ async function startGame() {
   score = 0;
   scoreEl.textContent = score;
   gameOverEl.hidden = true;
+  missedMoves = [];
+  hintIndex = -1;
+  reviewToolbar.hidden = true;
   clearSelection();
   try {
     const playerId = currentPlayer?.id || localStorage.getItem('fruitbox-player-id');
@@ -257,7 +353,17 @@ boardFrameEl.addEventListener('pointerup', finishSelection);
 boardFrameEl.addEventListener('pointercancel', clearSelection);
 document.querySelector('#new-game').addEventListener('click', startGame);
 document.querySelector('#play-again').addEventListener('click', startGame);
-document.querySelector('#close-results').addEventListener('click', () => { gameOverEl.hidden = true; });
+document.querySelector('#close-results').addEventListener('click', () => {
+  gameOverEl.hidden = true;
+  renderReviewToolbar();
+});
+highlightMissedButton.addEventListener('click', () => {
+  gameOverEl.hidden = true;
+  showMissedMove();
+});
+showMissedButton.addEventListener('click', () => showMissedMove());
+nextMissedButton.addEventListener('click', () => showMissedMove(hintIndex + 1));
+hideMissedButton.addEventListener('click', hideMissedMove);
 window.addEventListener('keydown', (event) => {
   if (event.code !== 'Space' || event.repeat || usernameDialog.open) return;
   event.preventDefault();
