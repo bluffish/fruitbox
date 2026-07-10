@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d0f12" />
+    <title>Fruitbox — make ten</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Fruitbox home">fruitbox</a>
+        <div class="status" aria-label="Game status">
+          <span><b id="timer">02:00</b> left</span>
+          <span><b id="score">0</b> score</span>
+          <button id="new-game" type="button" aria-label="Start a new game">↻</button>
+        </div>
+      </header>
+
+      <section class="play-area" aria-label="Fruitbox game">
+        <div class="board-frame">
+          <div id="board" class="board" role="grid" aria-label="Fruit grid">
+            <div id="selection-box" class="selection-box" aria-hidden="true"></div>
+          </div>
+          <div class="game-over" id="game-over" hidden>
+            <button id="close-results" class="close-results" type="button" aria-label="Close results and inspect board">×</button>
+            <strong id="final-score">0</strong>
+            <span>apples</span>
+            <button id="play-again" type="button">again</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="leaderboard" aria-labelledby="leaderboard-title">
+        <div class="leaderboard-heading">
+          <h2 id="leaderboard-title">All-time</h2>
+          <span>Score · time</span>
+        </div>
+        <ol id="leaderboard-list" aria-live="polite">
+          <li class="leaderboard-empty">Loading scores…</li>
+        </ol>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

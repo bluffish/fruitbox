@@ -1,0 +1,69 @@
+export const ROWS = 10;
+export const COLS = 17;
+export const BOARD_SIZE = ROWS * COLS;
+export const ROUND_MS = 120_000;
+
+const NUMBER_POOL = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9];
+
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state |= 0;
+    state = (state + 0x6D2B79F5) | 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+export function generateBoard(seed) {
+  const random = seededRandom(seed);
+  return Array.from({ length: ROWS }, () =>
+    Array.from({ length: COLS }, () => NUMBER_POOL[Math.floor(random() * NUMBER_POOL.length)]),
+  );
+}
+
+export function validateReplay(seed, moves) {
+  if (!Array.isArray(moves) || moves.length > BOARD_SIZE) throw new Error('Invalid move list.');
+  const board = generateBoard(seed);
+  let previousAt = 0;
+  let score = 0;
+
+  for (const move of moves) {
+    if (!move || !Array.isArray(move.cells) || move.cells.length === 0) throw new Error('Invalid move.');
+    if (!Number.isInteger(move.at) || move.at < previousAt || move.at > ROUND_MS) throw new Error('Invalid move time.');
+    previousAt = move.at;
+
+    const keys = new Set();
+    const cells = move.cells.map(({ row, col }) => {
+      if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row >= ROWS || col < 0 || col >= COLS) {
+        throw new Error('Invalid move coordinates.');
+      }
+      const key = `${row}:${col}`;
+      if (keys.has(key)) throw new Error('Duplicate move coordinates.');
+      keys.add(key);
+      return { row, col };
+    });
+
+    const top = Math.min(...cells.map((cell) => cell.row));
+    const bottom = Math.max(...cells.map((cell) => cell.row));
+    const left = Math.min(...cells.map((cell) => cell.col));
+    const right = Math.max(...cells.map((cell) => cell.col));
+    const expected = [];
+    for (let row = top; row <= bottom; row += 1) {
+      for (let col = left; col <= right; col += 1) {
+        if (board[row][col] !== null) expected.push({ row, col });
+      }
+    }
+    if (expected.length !== cells.length || expected.some(({ row, col }) => !keys.has(`${row}:${col}`))) {
+      throw new Error('A move must contain every remaining apple in one rectangle.');
+    }
+
+    const total = cells.reduce((sum, { row, col }) => sum + board[row][col], 0);
+    if (total !== 10) throw new Error('A move does not total 10.');
+    cells.forEach(({ row, col }) => { board[row][col] = null; });
+    score += cells.length;
+  }
+
+  return { score, cleared: score === BOARD_SIZE };
+}
