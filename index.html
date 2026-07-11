@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0d0f12" />
     <title>Fruitbox — make ten</title>
+    <script>try { document.documentElement.dataset.theme = localStorage.getItem('fruitbox-theme') || 'dark'; } catch { document.documentElement.dataset.theme = 'dark'; }</script>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -16,6 +17,7 @@
         <div class="brand-group">
           <a class="brand" href="/" aria-label="Fruitbox home">fruitbox</a>
           <button id="room-nav" class="mode-link" type="button">multiplayer</button>
+          <button id="theme-toggle" class="mode-link" type="button" aria-label="Switch to light mode">light</button>
         </div>
         <div class="status" aria-label="Game status">
           <span><b id="timer">02:00</b> left</span>

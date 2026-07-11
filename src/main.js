@@ -38,6 +38,7 @@ const roomStandings = document.querySelector('#room-standings');
 const standingsCode = document.querySelector('#standings-code');
 const standingsList = document.querySelector('#standings-list');
 const openRoomsList = document.querySelector('#open-rooms');
+const themeToggle = document.querySelector('#theme-toggle');
 
 let board = [];
 let cells = [];
@@ -62,6 +63,21 @@ let roomGameStarted = false;
 let roomCountdownTimer = null;
 let roomMoveId = 0;
 let roomListTimer = null;
+
+function renderThemeToggle() {
+  const light = document.documentElement.dataset.theme === 'light';
+  themeToggle.textContent = light ? 'dark' : 'light';
+  themeToggle.setAttribute('aria-label', `Switch to ${light ? 'dark' : 'light'} mode`);
+  document.querySelector('meta[name="theme-color"]').content = light ? '#f2efe7' : '#0d0f12';
+}
+
+themeToggle.addEventListener('click', () => {
+  const theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('fruitbox-theme', theme); } catch { /* Theme still applies for this visit. */ }
+  renderThemeToggle();
+});
+renderThemeToggle();
 
 function formatTime(value) {
   return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
