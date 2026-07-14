@@ -24,6 +24,16 @@ dialog#username-dialog { width: min(360px, calc(100% - 36px)); margin: auto; pad
 .open-rooms-heading { display: flex; justify-content: space-between; align-items: center; margin-top: 28px; padding-bottom: 9px; border-bottom: 1px solid #302f29; color: #817e72; font: 10px "DM Mono", monospace; }.open-rooms-heading button { padding: 0; border: 0; background: transparent; color: #817e72; cursor: pointer; font: inherit; }.open-rooms-heading button:hover { color: #e9e3d4; }.open-rooms { margin: 0; padding: 0; list-style: none; }.open-rooms li > button { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 40px; padding: 0; border: 0; border-bottom: 1px solid #292822; background: transparent; color: #d9d4c7; cursor: pointer; font: 11px "DM Mono", monospace; }.open-rooms li > button:hover { color: #fff8e8; background: #181813; }.open-rooms li b { color: #777469; font-weight: 400; }.open-rooms-empty { padding: 13px 0; color: #69675d; font: 10px "DM Mono", monospace; }
 @media (max-width: 780px) { .room-playing { width: min(100% - 24px, 650px); }.room-playing .play-area { display: block; }.room-standings { margin-top: 18px; }.room-standings li { grid-template-columns: 26px 1fr auto; } }
 @media (max-width: 650px) { .app-shell { width: min(100% - 24px, 650px); }.topbar { height: 62px; }.play-area { padding: 24px 0; }.board-frame { padding: 13px 8px; }.board { gap: 3px; }.fruit { font-size: clamp(8px, 3.8vw, 15px); }.status { gap: 9px; font-size: 0; }.status b { font-size: 11px; }.selection-box { border-width: 1.5px; }.room-screen { margin: 44px auto; } }
+@media (orientation: landscape) and (max-width: 950px) and (max-height: 560px) {
+  .app-shell,
+  .room-playing { width: auto; margin-right: max(10px, env(safe-area-inset-right)); margin-left: max(10px, env(safe-area-inset-left)); }
+  .topbar { height: 42px; }
+  .play-area { padding: 8px 0; }
+  .board-frame { width: min(100%, calc((100dvh - 58px) * 1.64)); margin-inline: auto; padding: 10px; }
+  .board { gap: 3px; }
+  .fruit { font-size: clamp(8px, 2.1vw, 14px); }
+  .room-screen { margin: 18px auto; }
+}
 
 :root[data-theme="light"] { color-scheme: light; background: #f2efe7; color: #292820; }
 :root[data-theme="light"] body { background: #f2efe7; }
