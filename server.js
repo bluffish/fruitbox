@@ -50,13 +50,18 @@ const insertVerifiedRun = db.prepare(`
   INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
 `);
+const hiddenLeaderboardNames = ['¯\\_(ツ)_/¯', 'Bot'];
 const leaderboard = db.prepare(`
   SELECT players.display_name AS displayName, runs.score, runs.duration_ms AS durationMs, runs.finished_at AS finishedAt
   FROM runs JOIN players ON players.id = runs.player_id
-  WHERE runs.verified = 1
+  WHERE runs.verified = 1 AND players.display_name NOT IN (?, ?)
   ORDER BY runs.score DESC, runs.duration_ms ASC, runs.finished_at ASC
   LIMIT ?
 `);
+
+function leaderboardEntries(limit) {
+  return leaderboard.all(...hiddenLeaderboardNames, limit);
+}
 
 function json(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -322,12 +327,12 @@ const server = createServer(async (request, response) => {
       const durationMs = replay.cleared ? Math.min(elapsed, ROUND_MS) : ROUND_MS;
       const finishedAt = Date.now();
       finishRun.run(finishedAt, replay.score, durationMs, JSON.stringify(moves), runId);
-      const rank = leaderboard.all(1000).findIndex((entry) => entry.finishedAt === finishedAt) + 1;
+      const rank = leaderboardEntries(1000).findIndex((entry) => entry.finishedAt === finishedAt) + 1;
       return json(response, 201, { score: replay.score, durationMs, rank });
     }
     if (request.method === 'GET' && url.pathname === '/api/leaderboard') {
       const requestedLimit = Number(url.searchParams.get('limit') || 20);
-      return json(response, 200, { entries: leaderboard.all(Math.max(1, Math.min(requestedLimit, 100))) });
+      return json(response, 200, { entries: leaderboardEntries(Math.max(1, Math.min(requestedLimit, 100))) });
     }
     return serveFile(url.pathname, response);
   } catch (error) {
