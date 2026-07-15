@@ -1,5 +1,5 @@
 import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join, normalize } from 'node:path';
@@ -43,6 +43,7 @@ db.exec(`
 `);
 const runColumns = new Set(db.prepare('PRAGMA table_info(runs)').all().map(({ name }) => name));
 if (!runColumns.has('anti_cheat')) db.exec('ALTER TABLE runs ADD COLUMN anti_cheat INTEGER NOT NULL DEFAULT 0');
+if (!runColumns.has('leaderboard_eligible')) db.exec('ALTER TABLE runs ADD COLUMN leaderboard_eligible INTEGER NOT NULL DEFAULT 1');
 db.exec(`
   CREATE TABLE IF NOT EXISTS run_moves (
     run_id TEXT NOT NULL REFERENCES runs(id),
@@ -59,19 +60,19 @@ const updatePlayerName = db.prepare('UPDATE players SET display_name = ? WHERE i
 const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at, anti_cheat) VALUES (?, ?, ?, ?, 1)');
 const getRun = db.prepare('SELECT * FROM runs WHERE id = ?');
 const finishRun = db.prepare('UPDATE runs SET finished_at = ?, score = ?, duration_ms = ?, moves_json = ?, verified = 1 WHERE id = ?');
-const disqualifyRun = db.prepare('UPDATE runs SET finished_at = ?, verified = -1 WHERE id = ? AND verified = 0');
+const rejectRunFromLeaderboard = db.prepare('UPDATE runs SET leaderboard_eligible = 0 WHERE id = ? AND leaderboard_eligible = 1');
 const getRunMoves = db.prepare('SELECT move_id AS moveId, received_at AS receivedAt, cells_json AS cellsJson FROM run_moves WHERE run_id = ? ORDER BY move_id');
 const insertRunMove = db.prepare('INSERT INTO run_moves (run_id, move_id, received_at, cells_json) VALUES (?, ?, ?, ?)');
 const deleteRunMoves = db.prepare('DELETE FROM run_moves WHERE run_id = ?');
 const insertVerifiedRun = db.prepare(`
-  INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+  INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified, anti_cheat, leaderboard_eligible)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
 `);
 const hiddenLeaderboardNames = ['¯\\_(ツ)_/¯', 'Bot'];
 const leaderboard = db.prepare(`
   SELECT players.display_name AS displayName, runs.score, runs.duration_ms AS durationMs, runs.finished_at AS finishedAt
   FROM runs JOIN players ON players.id = runs.player_id
-  WHERE runs.verified = 1 AND players.display_name NOT IN (?, ?)
+  WHERE runs.verified = 1 AND runs.leaderboard_eligible = 1 AND players.display_name NOT IN (?, ?)
   ORDER BY runs.score DESC, runs.duration_ms ASC, runs.finished_at ASC
   LIMIT ?
 `);
@@ -105,6 +106,16 @@ function validToken(runId, token) {
   return expected.length === received.length && timingSafeEqual(expected, received);
 }
 
+function writeAnticheatLog(entry) {
+  try {
+    appendFileSync(join(DATA_DIR, 'anticheat.log'), `${JSON.stringify({
+      timestamp: new Date().toISOString(), event: 'leaderboard_rejected', ...entry,
+    })}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch (error) {
+    console.error('Unable to write anticheat log:', error);
+  }
+}
+
 function cleanDisplayName(value) {
   if (typeof value !== 'string') throw new Error('Enter a name.');
   const name = value.trim().replace(/\s+/g, ' ');
@@ -129,6 +140,16 @@ function playerFor(id) {
   return createPlayer();
 }
 
+function flagSoloRun(run, reason, movedAt) {
+  const result = rejectRunFromLeaderboard.run(run.id);
+  if (result.changes === 0) return;
+  const player = getPlayer.get(run.player_id);
+  writeAnticheatLog({
+    mode: 'solo', runId: run.id, playerId: run.player_id,
+    displayName: player?.displayName, reason, movedAt,
+  });
+}
+
 const rooms = new Map();
 const roomConnections = new Map();
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -143,9 +164,9 @@ function createRoomCode() {
 function roomSnapshot(room, viewerId) {
   const connections = roomConnections.get(room.code) || new Set();
   const players = [...room.players.values()]
-    .sort((a, b) => Number(a.disqualified) - Number(b.disqualified) || b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
-    .map(({ id, displayName, ready, score, wins, completionMs, seat, disqualified }) => ({
-      id, displayName, ready, score, wins, completionMs, seat, disqualified,
+    .sort((a, b) => b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
+    .map(({ id, displayName, ready, score, wins, completionMs, seat }) => ({
+      id, displayName, ready, score, wins, completionMs, seat,
       connected: [...connections].some((socket) => socket.playerId === id && socket.readyState === 1),
     }));
   return {
@@ -164,24 +185,31 @@ function broadcastRoom(room) {
   for (const socket of roomConnections.get(room.code) || []) sendRoom(socket, room);
 }
 
+function flagRoomRun(room, player, reason, movedAt) {
+  if (!player.leaderboardEligible) return;
+  player.leaderboardEligible = false;
+  writeAnticheatLog({
+    mode: 'multiplayer', runId: player.runId, roomCode: room.code,
+    playerId: player.id, displayName: player.displayName, reason, movedAt,
+  });
+}
+
 function finishMultiplayerRoom(room) {
   if (room.status === 'finished') return;
   clearTimeout(room.finishTimer);
   room.status = 'finished';
   room.finishedAt = Date.now();
-  const eligiblePlayers = [...room.players.values()].filter((player) => !player.disqualified);
-  const highestScore = eligiblePlayers.length ? Math.max(...eligiblePlayers.map((player) => player.score)) : 0;
-  let winners = eligiblePlayers.filter((player) => player.score === highestScore);
+  const highestScore = Math.max(...[...room.players.values()].map((player) => player.score));
+  let winners = [...room.players.values()].filter((player) => player.score === highestScore);
   if (winners.length > 1 && highestScore === BOARD_SIZE) {
     const fastest = Math.min(...winners.map((player) => player.completionMs || ROUND_MS));
     winners = winners.filter((player) => (player.completionMs || ROUND_MS) === fastest);
   }
   if (room.players.size > 1 && winners.length === 1) winners[0].wins += 1;
   for (const player of room.players.values()) {
-    if (player.disqualified) continue;
     insertVerifiedRun.run(
-      randomUUID(), player.id, room.seed, room.startsAt, room.finishedAt,
-      player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves),
+      player.runId, player.id, room.seed, room.startsAt, room.finishedAt,
+      player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves), Number(player.leaderboardEligible),
     );
   }
   broadcastRoom(room);
@@ -198,7 +226,8 @@ function beginRoomCountdown(room) {
     room.status = 'live';
     for (const player of room.players.values()) {
       Object.assign(player, {
-        board: generateBoard(room.seed), score: 0, moves: [], lastMoveId: 0, completionMs: null, disqualified: false,
+        runId: randomUUID(), board: generateBoard(room.seed), score: 0, moves: [], lastMoveId: 0,
+        completionMs: null, leaderboardEligible: true,
       });
     }
     broadcastRoom(room);
@@ -218,7 +247,7 @@ function addPlayerToRoom(room, player) {
   if (room.players.size >= room.maxPlayers) throw new Error('This room is full.');
   room.players.set(player.id, {
     ...player, seat: room.players.size, ready: false, score: 0, wins: 0,
-    board: null, moves: [], lastMoveId: 0, completionMs: null, disqualified: false,
+    runId: null, board: null, moves: [], lastMoveId: 0, completionMs: null, leaderboardEligible: true,
   });
 }
 
@@ -322,7 +351,10 @@ const server = createServer(async (request, response) => {
       room.startsAt = null;
       room.finishedAt = null;
       for (const player of room.players.values()) {
-        Object.assign(player, { ready: false, score: 0, board: null, moves: [], lastMoveId: 0, completionMs: null, disqualified: false });
+        Object.assign(player, {
+          ready: false, score: 0, runId: null, board: null, moves: [], lastMoveId: 0,
+          completionMs: null, leaderboardEligible: true,
+        });
       }
       broadcastRoom(room);
       return json(response, 200, { room: roomSnapshot(room, playerId) });
@@ -349,17 +381,25 @@ const server = createServer(async (request, response) => {
       const movedAt = receivedAt - run.started_at;
       if (movedAt < 0 || movedAt > ROUND_MS + 1_000) throw new Error('Move outside the round.');
       const moveTimes = [...priorMoves.map((move) => move.receivedAt - run.started_at), movedAt];
+      let leaderboardEligible = run.leaderboard_eligible === 1;
+      if (leaderboardEligible) {
+        try {
+          validateMoveCadence(moveTimes);
+        } catch (error) {
+          flagSoloRun(run, error.message, movedAt);
+          leaderboardEligible = false;
+        }
+      }
       try {
-        validateMoveCadence(moveTimes);
         const board = generateBoard(run.seed);
         priorMoves.forEach((move) => applyMove(board, JSON.parse(move.cellsJson)));
         applyMove(board, cells);
       } catch (error) {
-        disqualifyRun.run(receivedAt, runId);
+        flagSoloRun(run, error.message, movedAt);
         throw error;
       }
       insertRunMove.run(runId, moveId, receivedAt, JSON.stringify(cells));
-      return json(response, 201, { moveId, at: Math.min(movedAt, ROUND_MS) });
+      return json(response, 201, { moveId, at: Math.min(movedAt, ROUND_MS), leaderboardEligible });
     }
     if (request.method === 'POST' && /^\/api\/runs\/[^/]+\/finish$/.test(url.pathname)) {
       const runId = url.pathname.split('/')[3];
@@ -367,6 +407,7 @@ const server = createServer(async (request, response) => {
       const run = getRun.get(runId);
       if (!run || run.verified || !validToken(runId, token)) return json(response, 401, { error: 'This run is not valid.' });
       let moves = submittedMoves;
+      let leaderboardEligible = run.leaderboard_eligible === 1;
       if (run.anti_cheat === 1) {
         const liveMoves = getRunMoves.all(runId);
         if (!Number.isInteger(moveCount) || moveCount !== liveMoves.length) {
@@ -376,7 +417,14 @@ const server = createServer(async (request, response) => {
           at: Math.min(move.receivedAt - run.started_at, ROUND_MS),
           cells: JSON.parse(move.cellsJson),
         }));
-        validateMoveCadence(moves.map(({ at }) => at));
+        if (leaderboardEligible) {
+          try {
+            validateMoveCadence(moves.map(({ at }) => at));
+          } catch (error) {
+            flagSoloRun(run, error.message, moves.at(-1)?.at);
+            leaderboardEligible = false;
+          }
+        }
       }
       const replay = validateReplay(run.seed, moves);
       const elapsed = Date.now() - run.started_at;
@@ -386,8 +434,10 @@ const server = createServer(async (request, response) => {
       const finishedAt = Date.now();
       finishRun.run(finishedAt, replay.score, durationMs, JSON.stringify(moves), runId);
       deleteRunMoves.run(runId);
-      const rank = leaderboardEntries(1000).findIndex((entry) => entry.finishedAt === finishedAt) + 1;
-      return json(response, 201, { score: replay.score, durationMs, rank });
+      const rank = leaderboardEligible
+        ? leaderboardEntries(1000).findIndex((entry) => entry.finishedAt === finishedAt) + 1
+        : null;
+      return json(response, 201, { score: replay.score, durationMs, rank, leaderboardEligible });
     }
     if (request.method === 'GET' && url.pathname === '/api/leaderboard') {
       const requestedLimit = Number(url.searchParams.get('limit') || 20);
@@ -418,16 +468,15 @@ webSockets.on('connection', (socket, request) => {
         const message = JSON.parse(raw.toString());
         if (message.type !== 'move' || room.status !== 'live') return;
         const player = room.players.get(playerId);
-        if (player.disqualified) throw new Error('This round was disqualified.');
         if (!Number.isInteger(message.moveId) || message.moveId !== player.lastMoveId + 1) throw new Error('Moves arrived out of order.');
         const movedAt = Date.now() - room.startsAt;
         if (movedAt < 0 || movedAt > ROUND_MS) throw new Error('Move outside the round.');
-        try {
-          validateMoveCadence([...player.moves.map(({ at }) => at), movedAt]);
-        } catch (error) {
-          player.disqualified = true;
-          broadcastRoom(room);
-          throw error;
+        if (player.leaderboardEligible) {
+          try {
+            validateMoveCadence([...player.moves.map(({ at }) => at), movedAt]);
+          } catch (error) {
+            flagRoomRun(room, player, error.message, movedAt);
+          }
         }
         const result = applyMove(player.board, message.cells);
         player.lastMoveId = message.moveId;

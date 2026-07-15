@@ -51,7 +51,7 @@ let timerId = null;
 let playing = false;
 let activeRun = null;
 let moves = [];
-let moveSync = { queue: Promise.resolve(), failed: false };
+let moveSync = { queue: Promise.resolve(), failed: false, leaderboardEligible: true };
 let startedAt = 0;
 let submitting = false;
 let startRequestId = 0;
@@ -338,8 +338,7 @@ function renderStandings() {
     const points = document.createElement('strong');
     place.textContent = String(index + 1).padStart(2, '0');
     name.textContent = player.id === currentPlayer.id ? `${player.displayName} · you` : player.displayName;
-    if (player.disqualified) name.append(' · disqualified');
-    points.textContent = player.disqualified ? '—' : `${player.score} · ${player.wins || 0}w`;
+    points.textContent = `${player.score} · ${player.wins || 0}w`;
     row.append(place, name, points);
     standingsList.append(row);
   });
@@ -548,7 +547,7 @@ async function startGame() {
     localStorage.setItem('fruitbox-player-id', currentPlayer.id);
     board = generateBoard(activeRun.seed);
     moves = [];
-    moveSync = { queue: Promise.resolve(), failed: false };
+    moveSync = { queue: Promise.resolve(), failed: false, leaderboardEligible: true };
     secondsLeft = ROUND_SECONDS;
     startedAt = performance.now();
     playing = true;
@@ -593,7 +592,8 @@ function syncSoloMove(run, moveId, selected) {
   const body = JSON.stringify({ token: run.token, moveId, cells: selected });
   sync.queue = sync.queue.then(async () => {
     if (sync.failed) return;
-    await request(`/api/runs/${run.id}/moves`, { method: 'POST', body });
+    const result = await request(`/api/runs/${run.id}/moves`, { method: 'POST', body });
+    if (result.leaderboardEligible === false) sync.leaderboardEligible = false;
   }).catch((error) => {
     sync.failed = true;
     console.error(error);
@@ -635,12 +635,15 @@ async function submitRun() {
   try {
     await sync.queue;
     if (sync.failed) throw new Error('Live move verification was interrupted.');
-    await request(`/api/runs/${run.id}/finish`, {
+    const result = await request(`/api/runs/${run.id}/finish`, {
       method: 'POST',
       body: JSON.stringify(run.antiCheat
         ? { token: run.token, moveCount: runMoves.length }
         : { token: run.token, moves: runMoves }),
     });
+    if (result.leaderboardEligible === false || sync.leaderboardEligible === false) {
+      finalScoreLabelEl.textContent = 'apples · not added to leaderboard';
+    }
     await loadLeaderboard();
   } catch (error) {
     finalScoreLabelEl.textContent = 'apples · score not submitted';
