@@ -5,12 +5,14 @@ import { createServer } from 'node:http';
 import { join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
-import { applyMove, BOARD_SIZE, generateBoard, ROUND_MS, validateReplay } from './src/game-engine.js';
+import {
+  applyMove, BOARD_SIZE, generateBoard, ROUND_MS, validateMoveCadence, validateReplay,
+} from './src/game-engine.js';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
+const DATA_DIR = process.env.FRUITBOX_DATA_DIR || join(ROOT, 'data');
 const DIST_DIR = join(ROOT, 'dist');
 mkdirSync(DATA_DIR, { recursive: true });
 const secretPath = join(DATA_DIR, 'leaderboard-secret');
@@ -39,13 +41,28 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS runs_leaderboard ON runs(verified, score DESC, duration_ms ASC, finished_at ASC);
 `);
+const runColumns = new Set(db.prepare('PRAGMA table_info(runs)').all().map(({ name }) => name));
+if (!runColumns.has('anti_cheat')) db.exec('ALTER TABLE runs ADD COLUMN anti_cheat INTEGER NOT NULL DEFAULT 0');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS run_moves (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    move_id INTEGER NOT NULL,
+    received_at INTEGER NOT NULL,
+    cells_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, move_id)
+  );
+`);
 
 const getPlayer = db.prepare('SELECT id, display_name AS displayName FROM players WHERE id = ?');
 const insertPlayer = db.prepare('INSERT INTO players (id, display_name, created_at) VALUES (?, ?, ?)');
 const updatePlayerName = db.prepare('UPDATE players SET display_name = ? WHERE id = ?');
-const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at) VALUES (?, ?, ?, ?)');
+const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at, anti_cheat) VALUES (?, ?, ?, ?, 1)');
 const getRun = db.prepare('SELECT * FROM runs WHERE id = ?');
 const finishRun = db.prepare('UPDATE runs SET finished_at = ?, score = ?, duration_ms = ?, moves_json = ?, verified = 1 WHERE id = ?');
+const disqualifyRun = db.prepare('UPDATE runs SET finished_at = ?, verified = -1 WHERE id = ? AND verified = 0');
+const getRunMoves = db.prepare('SELECT move_id AS moveId, received_at AS receivedAt, cells_json AS cellsJson FROM run_moves WHERE run_id = ? ORDER BY move_id');
+const insertRunMove = db.prepare('INSERT INTO run_moves (run_id, move_id, received_at, cells_json) VALUES (?, ?, ?, ?)');
+const deleteRunMoves = db.prepare('DELETE FROM run_moves WHERE run_id = ?');
 const insertVerifiedRun = db.prepare(`
   INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
@@ -126,9 +143,9 @@ function createRoomCode() {
 function roomSnapshot(room, viewerId) {
   const connections = roomConnections.get(room.code) || new Set();
   const players = [...room.players.values()]
-    .sort((a, b) => b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
-    .map(({ id, displayName, ready, score, wins, completionMs, seat }) => ({
-      id, displayName, ready, score, wins, completionMs, seat,
+    .sort((a, b) => Number(a.disqualified) - Number(b.disqualified) || b.score - a.score || (a.completionMs || Infinity) - (b.completionMs || Infinity) || a.seat - b.seat)
+    .map(({ id, displayName, ready, score, wins, completionMs, seat, disqualified }) => ({
+      id, displayName, ready, score, wins, completionMs, seat, disqualified,
       connected: [...connections].some((socket) => socket.playerId === id && socket.readyState === 1),
     }));
   return {
@@ -152,14 +169,16 @@ function finishMultiplayerRoom(room) {
   clearTimeout(room.finishTimer);
   room.status = 'finished';
   room.finishedAt = Date.now();
-  const highestScore = Math.max(...[...room.players.values()].map((player) => player.score));
-  let winners = [...room.players.values()].filter((player) => player.score === highestScore);
+  const eligiblePlayers = [...room.players.values()].filter((player) => !player.disqualified);
+  const highestScore = eligiblePlayers.length ? Math.max(...eligiblePlayers.map((player) => player.score)) : 0;
+  let winners = eligiblePlayers.filter((player) => player.score === highestScore);
   if (winners.length > 1 && highestScore === BOARD_SIZE) {
     const fastest = Math.min(...winners.map((player) => player.completionMs || ROUND_MS));
     winners = winners.filter((player) => (player.completionMs || ROUND_MS) === fastest);
   }
   if (room.players.size > 1 && winners.length === 1) winners[0].wins += 1;
   for (const player of room.players.values()) {
+    if (player.disqualified) continue;
     insertVerifiedRun.run(
       randomUUID(), player.id, room.seed, room.startsAt, room.finishedAt,
       player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves),
@@ -179,7 +198,7 @@ function beginRoomCountdown(room) {
     room.status = 'live';
     for (const player of room.players.values()) {
       Object.assign(player, {
-        board: generateBoard(room.seed), score: 0, moves: [], lastMoveId: 0, completionMs: null,
+        board: generateBoard(room.seed), score: 0, moves: [], lastMoveId: 0, completionMs: null, disqualified: false,
       });
     }
     broadcastRoom(room);
@@ -199,7 +218,7 @@ function addPlayerToRoom(room, player) {
   if (room.players.size >= room.maxPlayers) throw new Error('This room is full.');
   room.players.set(player.id, {
     ...player, seat: room.players.size, ready: false, score: 0, wins: 0,
-    board: null, moves: [], lastMoveId: 0, completionMs: null,
+    board: null, moves: [], lastMoveId: 0, completionMs: null, disqualified: false,
   });
 }
 
@@ -303,7 +322,7 @@ const server = createServer(async (request, response) => {
       room.startsAt = null;
       room.finishedAt = null;
       for (const player of room.players.values()) {
-        Object.assign(player, { ready: false, score: 0, board: null, moves: [], lastMoveId: 0, completionMs: null });
+        Object.assign(player, { ready: false, score: 0, board: null, moves: [], lastMoveId: 0, completionMs: null, disqualified: false });
       }
       broadcastRoom(room);
       return json(response, 200, { room: roomSnapshot(room, playerId) });
@@ -313,13 +332,52 @@ const server = createServer(async (request, response) => {
       const player = playerFor(playerId);
       const run = { id: randomUUID(), seed: randomInt(1, 2_147_483_647), startedAt: Date.now() };
       insertRun.run(run.id, player.id, run.seed, run.startedAt);
-      return json(response, 201, { ...run, token: sign(run.id), player });
+      return json(response, 201, { ...run, token: sign(run.id), antiCheat: true, player });
+    }
+    if (request.method === 'POST' && /^\/api\/runs\/[^/]+\/moves$/.test(url.pathname)) {
+      const runId = url.pathname.split('/')[3];
+      const { token, moveId, cells } = await readJson(request);
+      const run = getRun.get(runId);
+      if (!run || run.verified || run.anti_cheat !== 1 || !validToken(runId, token)) {
+        return json(response, 401, { error: 'This run is not valid.' });
+      }
+      const priorMoves = getRunMoves.all(runId);
+      if (!Number.isInteger(moveId) || moveId !== priorMoves.length + 1) {
+        throw new Error('Moves arrived out of order.');
+      }
+      const receivedAt = Date.now();
+      const movedAt = receivedAt - run.started_at;
+      if (movedAt < 0 || movedAt > ROUND_MS + 1_000) throw new Error('Move outside the round.');
+      const moveTimes = [...priorMoves.map((move) => move.receivedAt - run.started_at), movedAt];
+      try {
+        validateMoveCadence(moveTimes);
+        const board = generateBoard(run.seed);
+        priorMoves.forEach((move) => applyMove(board, JSON.parse(move.cellsJson)));
+        applyMove(board, cells);
+      } catch (error) {
+        disqualifyRun.run(receivedAt, runId);
+        throw error;
+      }
+      insertRunMove.run(runId, moveId, receivedAt, JSON.stringify(cells));
+      return json(response, 201, { moveId, at: Math.min(movedAt, ROUND_MS) });
     }
     if (request.method === 'POST' && /^\/api\/runs\/[^/]+\/finish$/.test(url.pathname)) {
       const runId = url.pathname.split('/')[3];
-      const { token, moves } = await readJson(request);
+      const { token, moves: submittedMoves, moveCount } = await readJson(request);
       const run = getRun.get(runId);
       if (!run || run.verified || !validToken(runId, token)) return json(response, 401, { error: 'This run is not valid.' });
+      let moves = submittedMoves;
+      if (run.anti_cheat === 1) {
+        const liveMoves = getRunMoves.all(runId);
+        if (!Number.isInteger(moveCount) || moveCount !== liveMoves.length) {
+          throw new Error('The live move record is incomplete.');
+        }
+        moves = liveMoves.map((move) => ({
+          at: Math.min(move.receivedAt - run.started_at, ROUND_MS),
+          cells: JSON.parse(move.cellsJson),
+        }));
+        validateMoveCadence(moves.map(({ at }) => at));
+      }
       const replay = validateReplay(run.seed, moves);
       const elapsed = Date.now() - run.started_at;
       if (!replay.cleared && elapsed < ROUND_MS - 1_500) return json(response, 422, { error: 'A non-cleared run must last two minutes.' });
@@ -327,6 +385,7 @@ const server = createServer(async (request, response) => {
       const durationMs = replay.cleared ? Math.min(elapsed, ROUND_MS) : ROUND_MS;
       const finishedAt = Date.now();
       finishRun.run(finishedAt, replay.score, durationMs, JSON.stringify(moves), runId);
+      deleteRunMoves.run(runId);
       const rank = leaderboardEntries(1000).findIndex((entry) => entry.finishedAt === finishedAt) + 1;
       return json(response, 201, { score: replay.score, durationMs, rank });
     }
@@ -359,9 +418,17 @@ webSockets.on('connection', (socket, request) => {
         const message = JSON.parse(raw.toString());
         if (message.type !== 'move' || room.status !== 'live') return;
         const player = room.players.get(playerId);
-        if (!Number.isInteger(message.moveId) || message.moveId <= player.lastMoveId) throw new Error('Duplicate move.');
+        if (player.disqualified) throw new Error('This round was disqualified.');
+        if (!Number.isInteger(message.moveId) || message.moveId !== player.lastMoveId + 1) throw new Error('Moves arrived out of order.');
         const movedAt = Date.now() - room.startsAt;
         if (movedAt < 0 || movedAt > ROUND_MS) throw new Error('Move outside the round.');
+        try {
+          validateMoveCadence([...player.moves.map(({ at }) => at), movedAt]);
+        } catch (error) {
+          player.disqualified = true;
+          broadcastRoom(room);
+          throw error;
+        }
         const result = applyMove(player.board, message.cells);
         player.lastMoveId = message.moveId;
         player.score += result.cleared;

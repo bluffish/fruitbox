@@ -8,6 +8,7 @@ const scoreEl = document.querySelector('#score');
 const timerEl = document.querySelector('#timer');
 const gameOverEl = document.querySelector('#game-over');
 const finalScoreEl = document.querySelector('#final-score');
+const finalScoreLabelEl = gameOverEl.querySelector(':scope > span');
 const selectionBoxEl = document.querySelector('#selection-box');
 const leaderboardEl = document.querySelector('#leaderboard-list');
 const usernameDialog = document.querySelector('#username-dialog');
@@ -50,6 +51,7 @@ let timerId = null;
 let playing = false;
 let activeRun = null;
 let moves = [];
+let moveSync = { queue: Promise.resolve(), failed: false };
 let startedAt = 0;
 let submitting = false;
 let startRequestId = 0;
@@ -336,7 +338,8 @@ function renderStandings() {
     const points = document.createElement('strong');
     place.textContent = String(index + 1).padStart(2, '0');
     name.textContent = player.id === currentPlayer.id ? `${player.displayName} · you` : player.displayName;
-    points.textContent = `${player.score} · ${player.wins || 0}w`;
+    if (player.disqualified) name.append(' · disqualified');
+    points.textContent = player.disqualified ? '—' : `${player.score} · ${player.wins || 0}w`;
     row.append(place, name, points);
     standingsList.append(row);
   });
@@ -545,10 +548,12 @@ async function startGame() {
     localStorage.setItem('fruitbox-player-id', currentPlayer.id);
     board = generateBoard(activeRun.seed);
     moves = [];
+    moveSync = { queue: Promise.resolve(), failed: false };
     secondsLeft = ROUND_SECONDS;
     startedAt = performance.now();
     playing = true;
     timerEl.textContent = formatTime(secondsLeft);
+    finalScoreLabelEl.textContent = 'apples';
     renderBoard();
     timerId = setInterval(tick, 250);
   } catch (error) {
@@ -582,6 +587,19 @@ boardFrameEl.addEventListener('pointermove', (event) => {
   updateSelection(pointerPosition(event));
 });
 
+function syncSoloMove(run, moveId, selected) {
+  if (!run?.antiCheat) return;
+  const sync = moveSync;
+  const body = JSON.stringify({ token: run.token, moveId, cells: selected });
+  sync.queue = sync.queue.then(async () => {
+    if (sync.failed) return;
+    await request(`/api/runs/${run.id}/moves`, { method: 'POST', body });
+  }).catch((error) => {
+    sync.failed = true;
+    console.error(error);
+  });
+}
+
 function finishSelection(event) {
   if (!selectionStart || !currentSelection) return;
   updateSelection(pointerPosition(event));
@@ -599,7 +617,10 @@ function finishSelection(event) {
     if (gameMode === 'room') {
       roomMoveId += 1;
       roomSocket?.send(JSON.stringify({ type: 'move', moveId: roomMoveId, cells: selected }));
-    } else if (score === BOARD_SIZE) endGame();
+    } else {
+      syncSoloMove(activeRun, moves.length, selected);
+      if (score === BOARD_SIZE) endGame();
+    }
   }
   clearSelection();
 }
@@ -607,15 +628,22 @@ function finishSelection(event) {
 async function submitRun() {
   if (!activeRun || submitting) return;
   const run = activeRun;
+  const runMoves = moves;
+  const sync = moveSync;
   activeRun = null;
   submitting = true;
   try {
+    await sync.queue;
+    if (sync.failed) throw new Error('Live move verification was interrupted.');
     await request(`/api/runs/${run.id}/finish`, {
       method: 'POST',
-      body: JSON.stringify({ token: run.token, moves }),
+      body: JSON.stringify(run.antiCheat
+        ? { token: run.token, moveCount: runMoves.length }
+        : { token: run.token, moves: runMoves }),
     });
     await loadLeaderboard();
   } catch (error) {
+    finalScoreLabelEl.textContent = 'apples · score not submitted';
     console.error(error);
   } finally {
     submitting = false;

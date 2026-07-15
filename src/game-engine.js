@@ -2,6 +2,26 @@ export const ROWS = 10;
 export const COLS = 17;
 export const BOARD_SIZE = ROWS * COLS;
 export const ROUND_MS = 120_000;
+export const MIN_MOVE_INTERVAL_MS = 220;
+
+export function validateMoveCadence(moveTimes) {
+  if (!Array.isArray(moveTimes) || moveTimes.some((time) => !Number.isInteger(time) || time < 0)) {
+    throw new Error('Invalid move timing.');
+  }
+  for (let index = 1; index < moveTimes.length; index += 1) {
+    const current = moveTimes[index];
+    if (current < moveTimes[index - 1]) throw new Error('Invalid move timing.');
+    if (current - moveTimes[index - 1] < MIN_MOVE_INTERVAL_MS) {
+      throw new Error('Moves are arriving too quickly.');
+    }
+    if (index >= 5 && current - moveTimes[index - 5] < 2_000) {
+      throw new Error('Too many moves in a short burst.');
+    }
+    if (index >= 8 && current - moveTimes[index - 8] < 5_000) {
+      throw new Error('Sustained move rate is too high.');
+    }
+  }
+}
 
 const NUMBER_POOL = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9];
 
