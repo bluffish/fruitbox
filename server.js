@@ -2,6 +2,7 @@ import { createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { isIP } from 'node:net';
 import { join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { WebSocketServer } from 'ws';
@@ -37,13 +38,17 @@ db.exec(`
     score INTEGER,
     duration_ms INTEGER,
     moves_json TEXT,
-    verified INTEGER NOT NULL DEFAULT 0
+    verified INTEGER NOT NULL DEFAULT 0,
+    anti_cheat INTEGER NOT NULL DEFAULT 0,
+    leaderboard_eligible INTEGER NOT NULL DEFAULT 1,
+    ip_address TEXT
   );
   CREATE INDEX IF NOT EXISTS runs_leaderboard ON runs(verified, score DESC, duration_ms ASC, finished_at ASC);
 `);
 const runColumns = new Set(db.prepare('PRAGMA table_info(runs)').all().map(({ name }) => name));
 if (!runColumns.has('anti_cheat')) db.exec('ALTER TABLE runs ADD COLUMN anti_cheat INTEGER NOT NULL DEFAULT 0');
 if (!runColumns.has('leaderboard_eligible')) db.exec('ALTER TABLE runs ADD COLUMN leaderboard_eligible INTEGER NOT NULL DEFAULT 1');
+if (!runColumns.has('ip_address')) db.exec('ALTER TABLE runs ADD COLUMN ip_address TEXT');
 db.exec(`
   CREATE TABLE IF NOT EXISTS run_moves (
     run_id TEXT NOT NULL REFERENCES runs(id),
@@ -57,7 +62,7 @@ db.exec(`
 const getPlayer = db.prepare('SELECT id, display_name AS displayName FROM players WHERE id = ?');
 const insertPlayer = db.prepare('INSERT INTO players (id, display_name, created_at) VALUES (?, ?, ?)');
 const updatePlayerName = db.prepare('UPDATE players SET display_name = ? WHERE id = ?');
-const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at, anti_cheat) VALUES (?, ?, ?, ?, 1)');
+const insertRun = db.prepare('INSERT INTO runs (id, player_id, seed, started_at, anti_cheat, ip_address) VALUES (?, ?, ?, ?, 1, ?)');
 const getRun = db.prepare('SELECT * FROM runs WHERE id = ?');
 const finishRun = db.prepare('UPDATE runs SET finished_at = ?, score = ?, duration_ms = ?, moves_json = ?, verified = 1 WHERE id = ?');
 const rejectRunFromLeaderboard = db.prepare('UPDATE runs SET leaderboard_eligible = 0 WHERE id = ? AND leaderboard_eligible = 1');
@@ -65,8 +70,8 @@ const getRunMoves = db.prepare('SELECT move_id AS moveId, received_at AS receive
 const insertRunMove = db.prepare('INSERT INTO run_moves (run_id, move_id, received_at, cells_json) VALUES (?, ?, ?, ?)');
 const deleteRunMoves = db.prepare('DELETE FROM run_moves WHERE run_id = ?');
 const insertVerifiedRun = db.prepare(`
-  INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified, anti_cheat, leaderboard_eligible)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?)
+  INSERT INTO runs (id, player_id, seed, started_at, finished_at, score, duration_ms, moves_json, verified, anti_cheat, leaderboard_eligible, ip_address)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)
 `);
 const hiddenLeaderboardNames = ['¯\\_(ツ)_/¯', 'Bot'];
 const leaderboard = db.prepare(`
@@ -104,6 +109,21 @@ function validToken(runId, token) {
   const expected = Buffer.from(sign(runId));
   const received = Buffer.from(token);
   return expected.length === received.length && timingSafeEqual(expected, received);
+}
+
+function normalizeIp(value) {
+  let ip = String(value || '').trim();
+  if (ip.startsWith('[') && ip.includes(']')) ip = ip.slice(1, ip.indexOf(']'));
+  if (ip.startsWith('::ffff:') && isIP(ip.slice(7)) === 4) ip = ip.slice(7);
+  return isIP(ip) ? ip : null;
+}
+
+function clientIp(request) {
+  const remote = normalizeIp(request.socket.remoteAddress);
+  if (remote !== '127.0.0.1' && remote !== '::1') return remote;
+  const header = request.headers['x-forwarded-for'];
+  const forwarded = Array.isArray(header) ? header[0] : String(header || '').split(',')[0];
+  return normalizeIp(forwarded) || remote;
 }
 
 function writeAnticheatLog(entry) {
@@ -146,7 +166,7 @@ function flagSoloRun(run, reason, movedAt) {
   const player = getPlayer.get(run.player_id);
   writeAnticheatLog({
     mode: 'solo', runId: run.id, playerId: run.player_id,
-    displayName: player?.displayName, reason, movedAt,
+    displayName: player?.displayName, ipAddress: run.ip_address, reason, movedAt,
   });
 }
 
@@ -190,7 +210,7 @@ function flagRoomRun(room, player, reason, movedAt) {
   player.leaderboardEligible = false;
   writeAnticheatLog({
     mode: 'multiplayer', runId: player.runId, roomCode: room.code,
-    playerId: player.id, displayName: player.displayName, reason, movedAt,
+    playerId: player.id, displayName: player.displayName, ipAddress: player.ipAddress, reason, movedAt,
   });
 }
 
@@ -209,7 +229,8 @@ function finishMultiplayerRoom(room) {
   for (const player of room.players.values()) {
     insertVerifiedRun.run(
       player.runId, player.id, room.seed, room.startsAt, room.finishedAt,
-      player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves), Number(player.leaderboardEligible),
+      player.score, player.completionMs || ROUND_MS, JSON.stringify(player.moves),
+      Number(player.leaderboardEligible), player.ipAddress,
     );
   }
   broadcastRoom(room);
@@ -241,12 +262,15 @@ function getRoom(code) {
   return room;
 }
 
-function addPlayerToRoom(room, player) {
-  if (room.players.has(player.id)) return;
+function addPlayerToRoom(room, player, ipAddress) {
+  if (room.players.has(player.id)) {
+    room.players.get(player.id).ipAddress = ipAddress || room.players.get(player.id).ipAddress;
+    return;
+  }
   if (room.status !== 'open') throw new Error('This room is no longer accepting players.');
   if (room.players.size >= room.maxPlayers) throw new Error('This room is full.');
   room.players.set(player.id, {
-    ...player, seat: room.players.size, ready: false, score: 0, wins: 0,
+    ...player, ipAddress, seat: room.players.size, ready: false, score: 0, wins: 0,
     runId: null, board: null, moves: [], lastMoveId: 0, completionMs: null, leaderboardEligible: true,
   });
 }
@@ -294,7 +318,7 @@ const server = createServer(async (request, response) => {
         code, hostPlayerId: player.id, maxPlayers: 8, status: 'open', seed: null,
         createdAt: Date.now(), startsAt: null, finishedAt: null, players: new Map(), startTimer: null, finishTimer: null,
       };
-      addPlayerToRoom(room, player);
+      addPlayerToRoom(room, player, clientIp(request));
       rooms.set(code, room);
       return json(response, 201, { room: roomSnapshot(room, player.id), player });
     }
@@ -319,7 +343,7 @@ const server = createServer(async (request, response) => {
       const { playerId } = await readJson(request);
       const room = getRoom(url.pathname.split('/')[3]);
       const player = playerFor(playerId);
-      addPlayerToRoom(room, player);
+      addPlayerToRoom(room, player, clientIp(request));
       broadcastRoom(room);
       return json(response, 200, { room: roomSnapshot(room, player.id), player });
     }
@@ -363,7 +387,7 @@ const server = createServer(async (request, response) => {
       const { playerId } = await readJson(request);
       const player = playerFor(playerId);
       const run = { id: randomUUID(), seed: randomInt(1, 2_147_483_647), startedAt: Date.now() };
-      insertRun.run(run.id, player.id, run.seed, run.startedAt);
+      insertRun.run(run.id, player.id, run.seed, run.startedAt, clientIp(request));
       return json(response, 201, { ...run, token: sign(run.id), antiCheat: true, player });
     }
     if (request.method === 'POST' && /^\/api\/runs\/[^/]+\/moves$/.test(url.pathname)) {
@@ -457,6 +481,7 @@ webSockets.on('connection', (socket, request) => {
     const room = getRoom(url.searchParams.get('room'));
     const playerId = url.searchParams.get('player');
     if (!room.players.has(playerId)) throw new Error('You are not in this room.');
+    room.players.get(playerId).ipAddress = clientIp(request) || room.players.get(playerId).ipAddress;
     socket.playerId = playerId;
     socket.roomCode = room.code;
     if (!roomConnections.has(room.code)) roomConnections.set(room.code, new Set());
