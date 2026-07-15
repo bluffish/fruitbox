@@ -8,23 +8,33 @@ test('accepts fast but human-scale move timing', () => {
   ]));
 });
 
-test('rejects moves closer than 220 milliseconds', () => {
-  assert.throws(() => validateMoveCadence([1_000, 1_219]), /too quickly/);
+test('accepts the fast human burst from run ae0ef8cb', () => {
+  assert.doesNotThrow(() => validateMoveCadence([
+    19_095, 19_513, 20_070, 20_511, 21_247, 21_616, 22_388, 23_169, 23_690,
+  ]));
 });
 
-test('rejects six-move bursts under two seconds', () => {
-  assert.throws(() => validateMoveCadence([1_000, 1_400, 1_800, 2_200, 2_600, 2_999]), /short burst/);
+test('rejects moves closer than 100 milliseconds', () => {
+  assert.throws(() => validateMoveCadence([1_000, 1_099]), /too quickly/);
 });
 
-test('rejects sustained nine-move bursts under five seconds', () => {
+test('rejects six-move bursts under one second', () => {
+  assert.throws(() => validateMoveCadence([1_000, 1_190, 1_380, 1_570, 1_760, 1_999]), /short burst/);
+});
+
+test('still rejects the observed 117 millisecond bot cadence', () => {
+  assert.throws(() => validateMoveCadence([1_000, 1_117, 1_234, 1_351, 1_468, 1_585]), /short burst/);
+});
+
+test('rejects sustained nine-move bursts under three seconds', () => {
   assert.throws(
-    () => validateMoveCadence([1_000, 1_625, 2_250, 2_875, 3_500, 4_125, 4_750, 5_375, 5_999]),
+    () => validateMoveCadence([1_000, 1_374, 1_748, 2_122, 2_496, 2_870, 3_244, 3_618, 3_992]),
     /Sustained move rate/,
   );
 });
 
 test('allows the burst limits at their exact boundaries', () => {
   assert.doesNotThrow(() => validateMoveCadence([
-    1_000, 1_400, 1_800, 2_200, 2_600, 3_000, 3_625, 4_375, 6_000,
+    1_000, 1_200, 1_400, 1_600, 1_800, 2_000, 2_500, 3_200, 4_000,
   ]));
 });
